@@ -746,11 +746,11 @@ const Dashboard = () => {
   };
 
   const pieData = {
-    labels: ["Tranche 1 – Patient Capital", "Tranche 2 – Yield Capital"],
+    labels: ["Early Exits", "Mid Term Exits", "Target Exits", "Late Exits"],
     datasets: [
       {
-        data: [60, 40],
-        backgroundColor: [C.navy, C.red],
+        data: [45, 28, 19, 8],
+        backgroundColor: [C.navy, C.red, C.greenLight, C.blueLight],
         borderColor: [C.white, C.white],
         borderWidth: 3,
       },
@@ -1270,6 +1270,200 @@ const Dashboard = () => {
                             />
                           </CardContent>
                         </Card>
+
+                        <Card
+                          elevation={0}
+                          sx={{
+                            border: `1px solid ${C.border}`,
+                            borderRadius: 1,
+                          }}
+                        >
+                          <CardContent>
+                            <SectionHeader
+                              title="Portfolio Structure"
+                              sub="Capital tranche allocation"
+                            />
+                            <Box
+                              sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 2,
+                              }}
+                            >
+                              <Box sx={{ width: 100, flexShrink: 0 }}>
+                                <Pie
+                                  data={pieData}
+                                  options={{
+                                    responsive: true,
+                                    plugins: {
+                                      legend: { display: false },
+                                      tooltip: baseTooltip,
+                                    },
+                                  }}
+                                />
+                              </Box>
+                              <Box>
+                                {[
+                                  {
+                                    label: "Early Exits",
+                                    pct: "45%",
+                                    desc: "Yrs 1–3",
+                                    color: C.navy,
+                                  },
+                                  {
+                                    label: "Mid Term Exits",
+                                    pct: "28%",
+                                    desc: "Yrs 4–7",
+                                    color: C.red,
+                                  },
+                                  {
+                                    label: "Target Exits",
+                                    pct: "19%",
+                                    desc: "Yrs 7–11",
+                                    color: C.greenLight,
+                                  },
+                                  {
+                                    label: "Late Exits",
+                                    pct: "8%",
+                                    desc: "Yrs 12+",
+                                    color: C.blueLight,
+                                  },
+                                ].map((t) => (
+                                  <Box
+                                    key={t.label}
+                                    sx={{
+                                      display: "flex",
+                                      gap: 1,
+                                      mb: 1,
+                                      alignItems: "flex-start",
+                                    }}
+                                  >
+                                    <Box
+                                      sx={{
+                                        width: 8,
+                                        height: 8,
+                                        borderRadius: "50%",
+                                        bgcolor: t.color,
+                                        mt: 0.5,
+                                        flexShrink: 0,
+                                      }}
+                                    />
+                                    <Typography
+                                      sx={{ fontSize: 10, color: C.charcoal }}
+                                    >
+                                      <strong>{t.label}</strong>{" "}
+                                      <span style={{ color: t.color }}>
+                                        {t.pct}
+                                      </span>{" "}
+                                      — {t.desc}
+                                    </Typography>
+                                  </Box>
+                                ))}
+                              </Box>
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      </Box>
+                    </Grid>
+
+                    {/* Right sub-col: Performance vs Benchmarks (tall) + Portfolio Structure */}
+                    <Grid item xs={12} sm={6}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 2,
+                          height: "100%",
+                        }}
+                      >
+                        <Card
+                          elevation={0}
+                          sx={{
+                            border: `1px solid ${C.border}`,
+                            borderRadius: 1,
+                            flex: 1,
+                          }}
+                        >
+                          <CardContent>
+                            <SectionHeader
+                              title="Performance vs. Benchmarks"
+                              sub="AmPledge bullet chart"
+                            />
+                            <BulletRow
+                              label="Avg Annual Return (%)"
+                              value={ampSt.avg}
+                              max={bulletMax(null, "avg")}
+                              benchmarks={bBenchmarks("avg")}
+                            />
+                            <BulletRow
+                              label="Sharpe Ratio"
+                              value={Math.max(0, ampSt.sharpe)}
+                              max={
+                                Math.max(
+                                  ampSt.sharpe,
+                                  spSt.sharpe,
+                                  bndSt.sharpe,
+                                  vnqSt.sharpe,
+                                  0.1,
+                                ) * 1.5
+                              }
+                              benchmarks={[
+                                {
+                                  label: "S&P 500",
+                                  value: Math.max(0, spSt.sharpe),
+                                  color: C.greenLight,
+                                },
+                                {
+                                  label: "Bonds",
+                                  value: Math.max(0, bndSt.sharpe),
+                                  color: C.blueLight,
+                                },
+                                {
+                                  label: "VNQ",
+                                  value: Math.max(0, vnqSt.sharpe),
+                                  color: C.purpleLight,
+                                },
+                              ]}
+                            />
+                            <BulletRow
+                              label="Volatility (%)"
+                              value={ampSt.vol}
+                              max={bulletMax(null, "vol")}
+                              benchmarks={bBenchmarks("vol")}
+                            />
+                            <BulletRow
+                              label="Total Return (%)"
+                              value={Math.max(0, ampSt.total)}
+                              max={
+                                Math.max(
+                                  ampSt.total,
+                                  spSt.total,
+                                  bndSt.total,
+                                  vnqSt.total,
+                                  1,
+                                ) * 1.3
+                              }
+                              benchmarks={[
+                                {
+                                  label: "S&P 500",
+                                  value: Math.max(0, spSt.total),
+                                  color: C.greenLight,
+                                },
+                                {
+                                  label: "Bonds",
+                                  value: Math.max(0, bndSt.total),
+                                  color: C.blueLight,
+                                },
+                                {
+                                  label: "VNQ",
+                                  value: Math.max(0, vnqSt.total),
+                                  color: C.purpleLight,
+                                },
+                              ]}
+                            />
+                          </CardContent>
+                        </Card>
+
                         <Card
                           elevation={0}
                           sx={{
@@ -1388,186 +1582,6 @@ const Dashboard = () => {
                                   </Typography>
                                 </Box>
                               ))}
-                            </Box>
-                          </CardContent>
-                        </Card>
-                      </Box>
-                    </Grid>
-
-                    {/* Right sub-col: Performance vs Benchmarks (tall) + Portfolio Structure */}
-                    <Grid item xs={12} sm={6}>
-                      <Box
-                        sx={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 2,
-                          height: "100%",
-                        }}
-                      >
-                        <Card
-                          elevation={0}
-                          sx={{
-                            border: `1px solid ${C.border}`,
-                            borderRadius: 1,
-                            flex: 1,
-                          }}
-                        >
-                          <CardContent>
-                            <SectionHeader
-                              title="Performance vs. Benchmarks"
-                              sub="AmPledge bullet chart"
-                            />
-                            <BulletRow
-                              label="Avg Annual Return (%)"
-                              value={ampSt.avg}
-                              max={bulletMax(null, "avg")}
-                              benchmarks={bBenchmarks("avg")}
-                            />
-                            <BulletRow
-                              label="Sharpe Ratio"
-                              value={Math.max(0, ampSt.sharpe)}
-                              max={
-                                Math.max(
-                                  ampSt.sharpe,
-                                  spSt.sharpe,
-                                  bndSt.sharpe,
-                                  vnqSt.sharpe,
-                                  0.1,
-                                ) * 1.5
-                              }
-                              benchmarks={[
-                                {
-                                  label: "S&P 500",
-                                  value: Math.max(0, spSt.sharpe),
-                                  color: C.greenLight,
-                                },
-                                {
-                                  label: "Bonds",
-                                  value: Math.max(0, bndSt.sharpe),
-                                  color: C.blueLight,
-                                },
-                                {
-                                  label: "VNQ",
-                                  value: Math.max(0, vnqSt.sharpe),
-                                  color: C.purpleLight,
-                                },
-                              ]}
-                            />
-                            <BulletRow
-                              label="Volatility (%)"
-                              value={ampSt.vol}
-                              max={bulletMax(null, "vol")}
-                              benchmarks={bBenchmarks("vol")}
-                            />
-                            <BulletRow
-                              label="Total Return (%)"
-                              value={Math.max(0, ampSt.total)}
-                              max={
-                                Math.max(
-                                  ampSt.total,
-                                  spSt.total,
-                                  bndSt.total,
-                                  vnqSt.total,
-                                  1,
-                                ) * 1.3
-                              }
-                              benchmarks={[
-                                {
-                                  label: "S&P 500",
-                                  value: Math.max(0, spSt.total),
-                                  color: C.greenLight,
-                                },
-                                {
-                                  label: "Bonds",
-                                  value: Math.max(0, bndSt.total),
-                                  color: C.blueLight,
-                                },
-                                {
-                                  label: "VNQ",
-                                  value: Math.max(0, vnqSt.total),
-                                  color: C.purpleLight,
-                                },
-                              ]}
-                            />
-                          </CardContent>
-                        </Card>
-                        <Card
-                          elevation={0}
-                          sx={{
-                            border: `1px solid ${C.border}`,
-                            borderRadius: 1,
-                          }}
-                        >
-                          <CardContent>
-                            <SectionHeader
-                              title="Portfolio Structure"
-                              sub="Capital tranche allocation"
-                            />
-                            <Box
-                              sx={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 2,
-                              }}
-                            >
-                              <Box sx={{ width: 100, flexShrink: 0 }}>
-                                <Pie
-                                  data={pieData}
-                                  options={{
-                                    responsive: true,
-                                    plugins: {
-                                      legend: { display: false },
-                                      tooltip: baseTooltip,
-                                    },
-                                  }}
-                                />
-                              </Box>
-                              <Box>
-                                {[
-                                  {
-                                    label: "Tranche 1",
-                                    pct: "60%",
-                                    desc: "Patient capital · Yrs 1–5",
-                                    color: C.navy,
-                                  },
-                                  {
-                                    label: "Tranche 2",
-                                    pct: "40%",
-                                    desc: "Yield capital · Yrs 3–7",
-                                    color: C.red,
-                                  },
-                                ].map((t) => (
-                                  <Box
-                                    key={t.label}
-                                    sx={{
-                                      display: "flex",
-                                      gap: 1,
-                                      mb: 1,
-                                      alignItems: "flex-start",
-                                    }}
-                                  >
-                                    <Box
-                                      sx={{
-                                        width: 8,
-                                        height: 8,
-                                        borderRadius: "50%",
-                                        bgcolor: t.color,
-                                        mt: 0.5,
-                                        flexShrink: 0,
-                                      }}
-                                    />
-                                    <Typography
-                                      sx={{ fontSize: 10, color: C.charcoal }}
-                                    >
-                                      <strong>{t.label}</strong>{" "}
-                                      <span style={{ color: t.color }}>
-                                        {t.pct}
-                                      </span>{" "}
-                                      — {t.desc}
-                                    </Typography>
-                                  </Box>
-                                ))}
-                              </Box>
                             </Box>
                           </CardContent>
                         </Card>
