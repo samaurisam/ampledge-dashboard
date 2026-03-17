@@ -850,7 +850,7 @@ const Dashboard = () => {
                 letterSpacing: "0.01em",
               }}
             >
-              AmPledge
+              American Pledge
             </Typography>
             <Box sx={{ width: 3, height: 18, bgcolor: C.red, mx: 0.5 }} />
             <Typography
@@ -2387,7 +2387,7 @@ const Dashboard = () => {
             (Vanguard Real Estate ETF)
           </Typography>
           <Typography sx={{ fontSize: 10, color: C.muted }}>
-            For institutional use only · Not investment advice · AmPledge{" "}
+            For institutional use only · Not investment advice · American Pledge{" "}
             {new Date().getFullYear()}
           </Typography>
         </Box>
