@@ -678,7 +678,7 @@ const Dashboard = () => {
         borderColor: C.red,
         backgroundColor: C.red + "15",
         borderWidth: 2.5,
-        pointRadius: 3,
+        pointRadius: 1,
         tension: 0.3,
       },
       {
