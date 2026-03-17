@@ -23,6 +23,17 @@ import {
 } from "chart.js";
 import { Line, Bar, Scatter, Pie } from "react-chartjs-2";
 
+const legendBottomPadding = {
+  id: "legendBottomPadding",
+  beforeInit(chart) {
+    const origFit = chart.legend.fit.bind(chart.legend);
+    chart.legend.fit = function () {
+      origFit();
+      this.height += 12;
+    };
+  },
+};
+
 ChartJS.register(
   LineElement,
   BarElement,
@@ -34,6 +45,7 @@ ChartJS.register(
   Legend,
   Title,
   Filler,
+  legendBottomPadding,
 );
 
 // ─── Color Palette (Morningstar-inspired) ──────────────────────────────────
@@ -61,7 +73,7 @@ const C = {
 // ─── Static Data ───────────────────────────────────────────────────────────
 // Simulation starts 2016 — matching the "2016-2026 Sim" sheet exactly.
 // Home value is FIXED at $400,000 (purchase price, not revalued annually).
-// Annual return formula: HOME_VALUE × HPA% × Cap + Fees + Bonuses
+// Annual return formula: HOME_VALUE Ã— HPA% Ã— Cap + Fees + Bonuses
 // Starting capital compounds: next_start = prev_start + annual_return
 
 const HOME_VALUE = 400000; // Fixed home purchase price throughout simulation
@@ -192,6 +204,7 @@ const BM = {
     4.0,
     7.5, // 2016-2025
   ],
+  // Source: Freddie Mac PMMS — 30-yr fixed rate annual averages
   mortgageRate: [
     10.3,
     10.3,
@@ -200,10 +213,10 @@ const BM = {
     8.4,
     7.3,
     8.4,
-    7.9,
+    8.0,
     7.8,
     7.6, // 1988-1997
-    6.9,
+    7.0,
     7.4,
     8.1,
     7.0,
@@ -212,65 +225,66 @@ const BM = {
     5.8,
     5.9,
     6.4,
-    6.3, // 1998-2007
+    6.4, // 1998-2007
     6.0,
-    5.0,
-    4.7,
+    5.1,
+    4.6,
     4.5,
     3.7,
-    4.0,
+    4.1,
     4.2,
     3.9, // 2008-2015
     3.7,
     4.0,
     4.5,
-    3.9,
-    3.1,
-    3.0,
-    5.3,
-    6.8,
-    6.7,
-    6.6, // 2016-2025
-  ],
-  delinquencyRate: [
-    5.0,
-    5.0,
-    6.0,
-    6.5,
-    6.0,
-    5.5,
-    5.0,
-    4.9,
-    4.9,
-    4.8, // 1988-1997
-    4.6,
-    4.5,
-    4.4,
-    5.1,
-    5.8,
-    5.9,
-    5.0,
-    4.4,
-    4.6,
-    6.1, // 1998-2007
-    9.6,
-    14.0,
-    13.0,
-    11.5,
-    10.0,
-    8.5,
-    6.7,
-    5.5, // 2008-2015
-    3.7,
     4.0,
-    4.5,
-    3.9,
     3.1,
     3.0,
     5.3,
     6.8,
+    6.7,
+    6.8, // 2016-2025
+  ],
+  // Source: MBA National Delinquency Survey — total 30+ day past due, all loans, seasonally adjusted
+  delinquencyRate: [
+    4.7,
+    4.9,
+    6.0,
+    7.3,
+    6.3,
+    4.9,
+    3.5,
+    2.9,
+    2.6,
+    2.3, // 1988-1997
+    2.1,
+    1.9,
+    1.9,
+    2.1,
+    2.0,
     1.8,
-    1.8, // 2016-2025
+    1.4,
+    1.4,
+    1.5,
+    2.3, // 1998-2007
+    4.7,
+    8.4,
+    9.7,
+    8.8,
+    8.0,
+    6.5,
+    4.8,
+    3.6, // 2008-2015
+    4.7,
+    4.8,
+    4.4,
+    4.2,
+    6.7,
+    5.4,
+    3.8,
+    3.6,
+    4.0,
+    4.1, // 2016-2025
   ],
 };
 const getBM = (field, yr) => {
@@ -529,7 +543,7 @@ const Dashboard = () => {
 
   // ── Build modeling table (recomputed on every yearRange change) ──
   // Cap schedule is relative to the start year (year 1 = first year in range).
-  // Formula: Annual Return = HOME_VALUE × HPA% × Cap + Fees + Bonuses
+  // Formula: Annual Return = HOME_VALUE Ã— HPA% Ã— Cap + Fees + Bonuses
   // Starting capital compounds: next_start = prev_start + annual_return
   let capital = 80000;
   let spComp = 1.0,
@@ -678,7 +692,7 @@ const Dashboard = () => {
         borderColor: C.red,
         backgroundColor: C.red + "15",
         borderWidth: 2.5,
-        pointRadius: 1,
+        pointRadius: 0,
         tension: 0.3,
       },
       {
@@ -687,17 +701,17 @@ const Dashboard = () => {
         borderColor: C.greenLight,
         backgroundColor: "transparent",
         borderWidth: 2,
-        pointRadius: 2,
+        pointRadius: 0,
         tension: 0.3,
         borderDash: [5, 3],
       },
       {
-        label: "Bond Index",
+        label: "Bonds",
         data: cumulative(bonds),
         borderColor: C.blueLight,
         backgroundColor: "transparent",
         borderWidth: 2,
-        pointRadius: 2,
+        pointRadius: 0,
         tension: 0.3,
         borderDash: [2, 2],
       },
@@ -707,7 +721,7 @@ const Dashboard = () => {
         borderColor: C.purpleLight,
         backgroundColor: "transparent",
         borderWidth: 2,
-        pointRadius: 2,
+        pointRadius: 0,
         tension: 0.3,
         borderDash: [6, 2],
       },
@@ -730,7 +744,7 @@ const Dashboard = () => {
         borderRadius: 2,
       },
       {
-        label: "Bond Index",
+        label: "Bonds",
         data: bonds,
         backgroundColor: C.blueLight + "cc",
         borderRadius: 2,
@@ -759,7 +773,7 @@ const Dashboard = () => {
         pointRadius: 9,
       },
       {
-        label: "Bond Index",
+        label: "Bonds",
         data: [{ x: bndSt.vol, y: bndSt.avg }],
         backgroundColor: C.blueLight,
         pointRadius: 9,
@@ -1902,11 +1916,11 @@ const Dashboard = () => {
                       : [
                           "Year",
                           "HPA %",
-                          "HOF IRR %",
+                          "AMPLEDGE IRR %",
                           "S&P 500",
                           "Bond Index",
                           "VNQ",
-                          "HOF CAGR",
+                          "AMPLEDGE CAGR",
                           "S&P 500 CAGR",
                           "Bond CAGR",
                           "VNQ CAGR",
