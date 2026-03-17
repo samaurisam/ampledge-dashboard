@@ -516,6 +516,12 @@ const baseLegend = {
 const Dashboard = () => {
   const [yearRange, setYearRange] = useState([2016, 2025]);
   const [selectedCity, setSelectedCity] = useState(null); // null = USA highlighted only
+  const [tableView, setTableView] = useState("detail"); // 'detail' | 'benchmark'
+  const [projectedHPA, setProjectedHPA] = useState(4.5); // assumed HPA for years > 2025
+  // Consensus CMA defaults: JP Morgan/Vanguard 2026 Long-Term Capital Market Assumptions
+  const [projectedSP, setProjectedSP] = useState(5.5);
+  const [projectedBond, setProjectedBond] = useState(4.5);
+  const [projectedVNQ, setProjectedVNQ] = useState(6.0);
 
   // All years in the selected range
   const displayYears = [];
@@ -526,18 +532,36 @@ const Dashboard = () => {
   // Formula: Annual Return = HOME_VALUE × HPA% × Cap + Fees + Bonuses
   // Starting capital compounds: next_start = prev_start + annual_return
   let capital = 80000;
+  let spComp = 1.0,
+    bndComp = 1.0,
+    vnqComp = 1.0;
   const table = displayYears
     .map((yr, i) => {
-      const hpa = getHPA(yr);
+      const projected = yr > 2025;
+      const hpa = projected ? projectedHPA : getHPA(yr);
       if (hpa == null) return null; // skip years with no HPA data
       const cap = CAP_SCHEDULE[i] ?? 1.0; // relative: i=0 → year 1
       const fees = i < 5 ? 900 : 0; // years 1–5 of any simulation
-      const bonuses = i === 4 ? 8104 : 0; // year 5 only
+      const bonuses = i === 6 ? 8104 : 0; // year 7 only
       const annualReturn = HOME_VALUE * (hpa / 100) * cap + fees + bonuses;
       const irr = (annualReturn / capital) * 100;
       const endingCapital = capital + annualReturn;
+      const cagr = (Math.pow(endingCapital / 80000, 1 / (i + 1)) - 1) * 100;
+      const sp = projected ? projectedSP : getBM("sp500", yr);
+      const bnd = projected ? projectedBond : getBM("bondIndex", yr);
+      const vnq = projected ? projectedVNQ : getBM("vnq", yr);
+      if (sp != null) spComp *= 1 + sp / 100;
+      if (bnd != null) bndComp *= 1 + bnd / 100;
+      if (vnq != null) vnqComp *= 1 + vnq / 100;
+      const n1 = i + 1;
+      const spCagr = sp != null ? (Math.pow(spComp, 1 / n1) - 1) * 100 : null;
+      const bndCagr =
+        bnd != null ? (Math.pow(bndComp, 1 / n1) - 1) * 100 : null;
+      const vnqCagr =
+        vnq != null ? (Math.pow(vnqComp, 1 / n1) - 1) * 100 : null;
       const row = {
         yr,
+        projected,
         apprec: hpa,
         starting: capital,
         cap: cap * 100,
@@ -546,11 +570,15 @@ const Dashboard = () => {
         annualReturn,
         ending: endingCapital,
         irr,
+        cagr,
         mortgageRate: getBM("mortgageRate", yr),
         delinquencyRate: getBM("delinquencyRate", yr),
-        sp500: getBM("sp500", yr),
-        bondIndex: getBM("bondIndex", yr),
-        vnq: getBM("vnq", yr),
+        sp500: sp,
+        bondIndex: bnd,
+        vnq,
+        spCagr,
+        bndCagr,
+        vnqCagr,
       };
       capital = endingCapital;
       return row;
@@ -750,7 +778,7 @@ const Dashboard = () => {
     datasets: [
       {
         data: [45, 28, 19, 8],
-        backgroundColor: [C.navy, C.red, C.greenLight, C.blueLight],
+        backgroundColor: [C.navy, C.red, C.purple, C.blueLight],
         borderColor: [C.white, C.white],
         borderWidth: 3,
       },
@@ -758,7 +786,7 @@ const Dashboard = () => {
   };
 
   // bullet chart max values
-  const bulletMax = (stat, accessor) =>
+  const bulletMax = (_stat, accessor) =>
     Math.max(
       ampSt[accessor],
       spSt[accessor],
@@ -950,11 +978,12 @@ const Dashboard = () => {
                       value={yearRange}
                       onChange={(_, v) => setYearRange(v)}
                       min={1988}
-                      max={2025}
+                      max={2035}
                       step={1}
                       valueLabelDisplay="auto"
                       marks={[
-                        1990, 1995, 2000, 2005, 2010, 2015, 2020, 2025,
+                        1990, 1995, 2000, 2005, 2010, 2015, 2020, 2025, 2030,
+                        2035,
                       ].map((y) => ({ value: y, label: String(y) }))}
                       sx={{
                         color: C.navy,
@@ -975,6 +1004,155 @@ const Dashboard = () => {
                       }}
                     />
                   </Box>
+                  {yearRange[1] > 2025 && (
+                    <Box sx={{ px: 2, pt: 1, pb: 0.5 }}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 1,
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <Typography
+                          sx={{
+                            fontSize: 11,
+                            color: C.muted,
+                            fontWeight: 600,
+                            mr: 0.5,
+                          }}
+                        >
+                          Projected HPA:
+                        </Typography>
+                        {[
+                          ["Bear", 2],
+                          ["Base", 4.5],
+                          ["Bull", 7],
+                        ].map(([label, val]) => (
+                          <button
+                            key={label}
+                            onClick={() => setProjectedHPA(val)}
+                            style={{
+                              padding: "3px 10px",
+                              fontSize: 11,
+                              fontWeight: 600,
+                              fontFamily: "'Inter',sans-serif",
+                              border: `1px solid ${projectedHPA === val ? C.navy : C.border}`,
+                              borderRadius: 4,
+                              cursor: "pointer",
+                              background:
+                                projectedHPA === val ? C.navy : C.white,
+                              color: projectedHPA === val ? C.white : C.muted,
+                            }}
+                          >
+                            {label} {val}%
+                          </button>
+                        ))}
+                        <Box
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 0.5,
+                            ml: 0.5,
+                          }}
+                        >
+                          <input
+                            type="number"
+                            min={-10}
+                            max={30}
+                            step={0.1}
+                            value={projectedHPA}
+                            onChange={(e) =>
+                              setProjectedHPA(parseFloat(e.target.value) || 0)
+                            }
+                            style={{
+                              width: 60,
+                              padding: "3px 6px",
+                              fontSize: 11,
+                              fontFamily: "'Inter',sans-serif",
+                              border: `1px solid ${C.border}`,
+                              borderRadius: 4,
+                              textAlign: "right",
+                            }}
+                          />
+                          <Typography sx={{ fontSize: 11, color: C.muted }}>
+                            %
+                          </Typography>
+                        </Box>
+                      </Box>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 2,
+                          mt: 1,
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        {[
+                          ["S&P 500", projectedSP, setProjectedSP],
+                          ["Bonds", projectedBond, setProjectedBond],
+                          ["VNQ", projectedVNQ, setProjectedVNQ],
+                        ].map(([label, val, setter]) => (
+                          <Box
+                            key={label}
+                            sx={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 0.5,
+                            }}
+                          >
+                            <Typography
+                              sx={{
+                                fontSize: 11,
+                                color: C.muted,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {label}:
+                            </Typography>
+                            <input
+                              type="number"
+                              min={-20}
+                              max={50}
+                              step={0.1}
+                              value={val}
+                              onChange={(e) =>
+                                setter(parseFloat(e.target.value) || 0)
+                              }
+                              style={{
+                                width: 56,
+                                padding: "3px 6px",
+                                fontSize: 11,
+                                fontFamily: "'Inter',sans-serif",
+                                border: `1px solid ${C.border}`,
+                                borderRadius: 4,
+                                textAlign: "right",
+                              }}
+                            />
+                            <Typography sx={{ fontSize: 11, color: C.muted }}>
+                              %
+                            </Typography>
+                          </Box>
+                        ))}
+                        <Typography
+                          sx={{
+                            fontSize: 10,
+                            color: C.muted,
+                            fontStyle: "italic",
+                          }}
+                        >
+                          Source: JP Morgan / Vanguard 2026 CMA
+                        </Typography>
+                      </Box>
+                      <Typography
+                        sx={{ fontSize: 10, color: C.orange, mt: 0.5 }}
+                      >
+                        ⚠ Years 2026–{yearRange[1]} are projections, not
+                        historical data
+                      </Typography>
+                    </Box>
+                  )}
                 </CardContent>
               </Card>
 
@@ -1320,7 +1498,7 @@ const Dashboard = () => {
                                     label: "Target Exits",
                                     pct: "19%",
                                     desc: "Yrs 7–11",
-                                    color: C.greenLight,
+                                    color: C.purple,
                                   },
                                   {
                                     label: "Late Exits",
@@ -1648,10 +1826,55 @@ const Dashboard = () => {
           sx={{ border: `1px solid ${C.border}`, borderRadius: 1, mb: 3 }}
         >
           <CardContent>
-            <SectionHeader
-              title="Historical Modeling Table"
-              sub="Portfolio simulation · Starting capital $80,000 · AmPledge cap schedule · Annual fees $900 (yrs 1–5) · Bonuses at yr 5 & yr 10"
-            />
+            <Box
+              sx={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                mb: 1.5,
+              }}
+            >
+              <SectionHeader
+                title="Historical Modeling Table"
+                sub="Portfolio simulation · Starting capital $80,000 · AmPledge cap schedule · Annual fees $900 (yrs 1–5) · Bonus $8,104 at yr 7"
+              />
+              <Box
+                sx={{
+                  display: "flex",
+                  gap: 0,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: 1,
+                  overflow: "hidden",
+                  flexShrink: 0,
+                  ml: 2,
+                }}
+              >
+                {[
+                  ["detail", "Portfolio Detail"],
+                  ["benchmark", "Benchmark Comparison"],
+                ].map(([v, label]) => (
+                  <button
+                    key={v}
+                    onClick={() => setTableView(v)}
+                    style={{
+                      padding: "6px 14px",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      fontFamily: "'Inter',sans-serif",
+                      border: "none",
+                      borderRight:
+                        v === "detail" ? `1px solid ${C.border}` : "none",
+                      cursor: "pointer",
+                      background: tableView === v ? C.navy : C.white,
+                      color: tableView === v ? C.white : C.muted,
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </Box>
+            </Box>
             <Box sx={{ overflowX: "auto", overflowY: "auto", maxHeight: 380 }}>
               <table
                 style={{
@@ -1663,22 +1886,32 @@ const Dashboard = () => {
               >
                 <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
                   <tr style={{ background: C.navy }}>
-                    {[
-                      "Year",
-                      "HPA %",
-                      "Starting Capital",
-                      "Cap %",
-                      "Fees",
-                      "Bonuses",
-                      "Annual Return $",
-                      "IRR %",
-                      "Ending Capital",
-                      "Mortgage Rate",
-                      "Delinquency",
-                      "S&P 500",
-                      "Bond Index",
-                      "VNQ",
-                    ].map((h) => (
+                    {(tableView === "detail"
+                      ? [
+                          "Year",
+                          "Mortgage Rate",
+                          "Delinquency",
+                          "HPA %",
+                          "Starting Capital",
+                          "Cap %",
+                          "Bonuses",
+                          "Annual Return $",
+                          "IRR %",
+                          "Ending Capital",
+                        ]
+                      : [
+                          "Year",
+                          "HPA %",
+                          "HOF IRR %",
+                          "S&P 500",
+                          "Bond Index",
+                          "VNQ",
+                          "HOF CAGR",
+                          "S&P 500 CAGR",
+                          "Bond CAGR",
+                          "VNQ CAGR",
+                        ]
+                    ).map((h) => (
                       <th
                         key={h}
                         style={{
@@ -1700,9 +1933,17 @@ const Dashboard = () => {
                 <tbody>
                   {displayYears.map((yr, i) => {
                     const r = table.find((row) => row.yr === yr);
-                    const bg = i % 2 === 0 ? C.white : C.rowAlt;
-                    const returnColor = (v) =>
+                    const isProj = r?.projected || yr > 2025;
+                    const bg = isProj
+                      ? i % 2 === 0
+                        ? "#eef4ff"
+                        : "#e4eefa"
+                      : i % 2 === 0
+                        ? C.white
+                        : C.rowAlt;
+                    const rc = (v) =>
                       v > 5 ? C.green : v > 0 ? C.charcoal : C.red;
+                    const emptyCount = tableView === "detail" ? 9 : 9;
                     if (!r)
                       return (
                         <tr
@@ -1721,7 +1962,7 @@ const Dashboard = () => {
                           >
                             {yr}
                           </td>
-                          {Array(13)
+                          {Array(emptyCount)
                             .fill(null)
                             .map((_, j) => (
                               <td
@@ -1738,6 +1979,137 @@ const Dashboard = () => {
                             ))}
                         </tr>
                       );
+                    if (tableView === "detail")
+                      return (
+                        <tr
+                          key={yr}
+                          style={{
+                            background: bg,
+                            borderBottom: `1px solid ${C.border}`,
+                          }}
+                        >
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              fontWeight: 700,
+                              color: C.navy,
+                              fontVariantNumeric: "tabular-nums",
+                              fontStyle: isProj ? "italic" : "normal",
+                            }}
+                          >
+                            {r.yr}
+                            {isProj && (
+                              <span
+                                style={{
+                                  marginLeft: 4,
+                                  fontSize: 9,
+                                  fontWeight: 700,
+                                  color: C.white,
+                                  background: C.blue,
+                                  borderRadius: 3,
+                                  padding: "1px 4px",
+                                  verticalAlign: "middle",
+                                }}
+                              >
+                                PROJ
+                              </span>
+                            )}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              textAlign: "right",
+                              color: C.muted,
+                            }}
+                          >
+                            {r.mortgageRate != null
+                              ? r.mortgageRate.toFixed(1) + "%"
+                              : "—"}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              textAlign: "right",
+                              color: C.muted,
+                            }}
+                          >
+                            {r.delinquencyRate != null
+                              ? r.delinquencyRate.toFixed(1) + "%"
+                              : "—"}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              textAlign: "right",
+                              color: rc(r.apprec),
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {r.apprec.toFixed(1)}%
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              textAlign: "right",
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {fmtUSD(r.starting)}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              textAlign: "right",
+                              color: C.muted,
+                            }}
+                          >
+                            {r.cap.toFixed(1)}%
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              textAlign: "right",
+                              color:
+                                r.fees + r.bonuses > 0 ? C.greenLight : C.muted,
+                            }}
+                          >
+                            {r.fees + r.bonuses > 0
+                              ? fmtUSD(r.fees + r.bonuses)
+                              : "—"}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              textAlign: "right",
+                              fontWeight: 600,
+                              fontVariantNumeric: "tabular-nums",
+                              color: rc(r.annualReturn),
+                            }}
+                          >
+                            {fmtUSD(r.annualReturn)}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              textAlign: "right",
+                              fontWeight: 700,
+                              color: rc(r.irr),
+                            }}
+                          >
+                            {fmtSign(r.irr)}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px 11px",
+                              textAlign: "right",
+                              fontWeight: 600,
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {fmtUSD(r.ending)}
+                          </td>
+                        </tr>
+                      );
                     return (
                       <tr
                         key={yr}
@@ -1752,16 +2124,32 @@ const Dashboard = () => {
                             fontWeight: 700,
                             color: C.navy,
                             fontVariantNumeric: "tabular-nums",
+                            fontStyle: isProj ? "italic" : "normal",
                           }}
                         >
                           {r.yr}
+                          {isProj && (
+                            <span
+                              style={{
+                                marginLeft: 4,
+                                fontSize: 9,
+                                fontWeight: 700,
+                                color: C.white,
+                                background: C.blue,
+                                borderRadius: 3,
+                                padding: "1px 4px",
+                                verticalAlign: "middle",
+                              }}
+                            >
+                              PROJ
+                            </span>
+                          )}
                         </td>
                         <td
                           style={{
                             padding: "8px 11px",
                             textAlign: "right",
-                            color: returnColor(r.apprec),
-                            fontVariantNumeric: "tabular-nums",
+                            color: rc(r.apprec),
                           }}
                         >
                           {r.apprec.toFixed(1)}%
@@ -1770,55 +2158,8 @@ const Dashboard = () => {
                           style={{
                             padding: "8px 11px",
                             textAlign: "right",
-                            fontVariantNumeric: "tabular-nums",
-                          }}
-                        >
-                          {fmtUSD(r.starting)}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 11px",
-                            textAlign: "right",
-                            color: C.muted,
-                          }}
-                        >
-                          {r.cap.toFixed(1)}%
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 11px",
-                            textAlign: "right",
-                            color: C.muted,
-                          }}
-                        >
-                          {r.fees > 0 ? fmtUSD(r.fees) : "—"}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 11px",
-                            textAlign: "right",
-                            color: r.bonuses > 0 ? C.greenLight : C.muted,
-                          }}
-                        >
-                          {r.bonuses > 0 ? fmtUSD(r.bonuses) : "—"}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 11px",
-                            textAlign: "right",
-                            fontWeight: 600,
-                            fontVariantNumeric: "tabular-nums",
-                            color: returnColor(r.annualReturn),
-                          }}
-                        >
-                          {fmtUSD(r.annualReturn)}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 11px",
-                            textAlign: "right",
                             fontWeight: 700,
-                            color: returnColor(r.irr),
+                            color: rc(r.irr),
                           }}
                         >
                           {fmtSign(r.irr)}
@@ -1827,56 +2168,66 @@ const Dashboard = () => {
                           style={{
                             padding: "8px 11px",
                             textAlign: "right",
-                            fontWeight: 600,
-                            fontVariantNumeric: "tabular-nums",
+                            color: r.sp500 != null ? rc(r.sp500) : C.muted,
                           }}
                         >
-                          {fmtUSD(r.ending)}
+                          {r.sp500 != null ? fmtSign(r.sp500) : "—"}
                         </td>
                         <td
                           style={{
                             padding: "8px 11px",
                             textAlign: "right",
-                            color: C.muted,
+                            color:
+                              r.bondIndex != null ? rc(r.bondIndex) : C.muted,
                           }}
                         >
-                          {r.mortgageRate.toFixed(1)}%
+                          {r.bondIndex != null ? fmtSign(r.bondIndex) : "—"}
                         </td>
                         <td
                           style={{
                             padding: "8px 11px",
                             textAlign: "right",
-                            color: C.muted,
+                            color: r.vnq != null ? rc(r.vnq) : C.muted,
                           }}
                         >
-                          {r.delinquencyRate.toFixed(1)}%
+                          {r.vnq != null ? fmtSign(r.vnq) : "—"}
                         </td>
                         <td
                           style={{
                             padding: "8px 11px",
                             textAlign: "right",
-                            color: returnColor(r.sp500),
+                            fontWeight: 700,
+                            color: rc(r.cagr),
                           }}
                         >
-                          {fmtSign(r.sp500)}
+                          {fmtSign(r.cagr)}
                         </td>
                         <td
                           style={{
                             padding: "8px 11px",
                             textAlign: "right",
-                            color: returnColor(r.bondIndex),
+                            color: r.spCagr != null ? rc(r.spCagr) : C.muted,
                           }}
                         >
-                          {fmtSign(r.bondIndex)}
+                          {r.spCagr != null ? fmtSign(r.spCagr) : "—"}
                         </td>
                         <td
                           style={{
                             padding: "8px 11px",
                             textAlign: "right",
-                            color: returnColor(r.vnq),
+                            color: r.bndCagr != null ? rc(r.bndCagr) : C.muted,
                           }}
                         >
-                          {fmtSign(r.vnq)}
+                          {r.bndCagr != null ? fmtSign(r.bndCagr) : "—"}
+                        </td>
+                        <td
+                          style={{
+                            padding: "8px 11px",
+                            textAlign: "right",
+                            color: r.vnqCagr != null ? rc(r.vnqCagr) : C.muted,
+                          }}
+                        >
+                          {r.vnqCagr != null ? fmtSign(r.vnqCagr) : "—"}
                         </td>
                       </tr>
                     );
@@ -1889,148 +2240,130 @@ const Dashboard = () => {
                       borderTop: `2px solid ${C.navy}`,
                     }}
                   >
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        fontWeight: 800,
-                        color: C.navy,
-                        fontSize: 11,
-                      }}
-                    >
-                      AVG / TOTAL
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        fontWeight: 600,
-                        fontSize: 11,
-                      }}
-                    >
-                      {hpaAvg.toFixed(1)}%
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        color: C.muted,
-                        fontSize: 11,
-                      }}
-                    >
-                      —
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        color: C.muted,
-                        fontSize: 11,
-                      }}
-                    >
-                      —
-                    </td>
-                    <td
-                      style={{
+                    {(() => {
+                      const last =
+                        table.length > 0 ? table[table.length - 1] : null;
+                      const fs = {
                         padding: "9px 11px",
                         textAlign: "right",
                         fontSize: 11,
-                      }}
-                    >
-                      {fmtUSD(totalFees)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        color: C.greenLight,
-                        fontWeight: 600,
-                        fontSize: 11,
-                      }}
-                    >
-                      {fmtUSD(totalBon)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        fontWeight: 800,
-                        color: C.greenLight,
-                        fontSize: 11,
-                      }}
-                    >
-                      {fmtUSD(table.reduce((s, r) => s + r.annualReturn, 0))}
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        fontWeight: 800,
-                        color: C.greenLight,
-                        fontSize: 11,
-                      }}
-                    >
-                      {fmtSign(ampSt.avg)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        fontWeight: 800,
-                        fontSize: 11,
-                      }}
-                    >
-                      {fmtUSD(finalEnd)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        color: C.muted,
-                        fontSize: 11,
-                      }}
-                    >
-                      {mrgAvg.toFixed(1)}%
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        color: C.muted,
-                        fontSize: 11,
-                      }}
-                    >
-                      {delAvg.toFixed(1)}%
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        fontWeight: 600,
-                        fontSize: 11,
-                      }}
-                    >
-                      {fmtSign(spSt.avg)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        fontWeight: 600,
-                        fontSize: 11,
-                      }}
-                    >
-                      {fmtSign(bndSt.avg)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "9px 11px",
-                        textAlign: "right",
-                        fontWeight: 600,
-                        fontSize: 11,
-                      }}
-                    >
-                      {fmtSign(vnqSt.avg)}
-                    </td>
+                      };
+                      if (tableView === "detail")
+                        return (
+                          <>
+                            <td
+                              style={{
+                                ...fs,
+                                fontWeight: 800,
+                                color: C.navy,
+                                textAlign: "left",
+                              }}
+                            >
+                              AVG / TOTAL
+                            </td>
+                            <td style={{ ...fs, color: C.muted }}>
+                              {mrgAvg.toFixed(1)}%
+                            </td>
+                            <td style={{ ...fs, color: C.muted }}>
+                              {delAvg.toFixed(1)}%
+                            </td>
+                            <td style={{ ...fs, fontWeight: 600 }}>
+                              {hpaAvg.toFixed(1)}%
+                            </td>
+                            <td style={{ ...fs, color: C.muted }}>—</td>
+                            <td style={{ ...fs, color: C.muted }}>—</td>
+                            <td
+                              style={{
+                                ...fs,
+                                color: C.greenLight,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {fmtUSD(totalFees + totalBon)}
+                            </td>
+                            <td
+                              style={{
+                                ...fs,
+                                fontWeight: 800,
+                                color: C.greenLight,
+                              }}
+                            >
+                              {fmtUSD(
+                                table.reduce((s, r) => s + r.annualReturn, 0),
+                              )}
+                            </td>
+                            <td
+                              style={{
+                                ...fs,
+                                fontWeight: 800,
+                                color: C.greenLight,
+                              }}
+                            >
+                              {fmtSign(ampSt.avg)}
+                            </td>
+                            <td style={{ ...fs, fontWeight: 800 }}>
+                              {fmtUSD(finalEnd)}
+                            </td>
+                          </>
+                        );
+                      return (
+                        <>
+                          <td
+                            style={{
+                              ...fs,
+                              fontWeight: 800,
+                              color: C.navy,
+                              textAlign: "left",
+                            }}
+                          >
+                            HOF AVG / CAGR
+                          </td>
+                          <td style={{ ...fs, fontWeight: 600 }}>
+                            {hpaAvg.toFixed(1)}%
+                          </td>
+                          <td
+                            style={{
+                              ...fs,
+                              fontWeight: 800,
+                              color: C.greenLight,
+                            }}
+                          >
+                            {fmtSign(ampSt.avg)}
+                          </td>
+                          <td style={{ ...fs, fontWeight: 600 }}>
+                            {fmtSign(spSt.avg)}
+                          </td>
+                          <td style={{ ...fs, fontWeight: 600 }}>
+                            {fmtSign(bndSt.avg)}
+                          </td>
+                          <td style={{ ...fs, fontWeight: 600 }}>
+                            {fmtSign(vnqSt.avg)}
+                          </td>
+                          <td
+                            style={{
+                              ...fs,
+                              fontWeight: 800,
+                              color: C.greenLight,
+                            }}
+                          >
+                            {last ? fmtSign(last.cagr) : "—"}
+                          </td>
+                          <td style={{ ...fs, fontWeight: 600 }}>
+                            {last?.spCagr != null ? fmtSign(last.spCagr) : "—"}
+                          </td>
+                          <td style={{ ...fs, fontWeight: 600 }}>
+                            {last?.bndCagr != null
+                              ? fmtSign(last.bndCagr)
+                              : "—"}
+                          </td>
+                          <td style={{ ...fs, fontWeight: 600 }}>
+                            {last?.vnqCagr != null
+                              ? fmtSign(last.vnqCagr)
+                              : "—"}
+                          </td>
+                        </>
+                      );
+                    })()}
                   </tr>
                 </tfoot>
               </table>
