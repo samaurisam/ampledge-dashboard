@@ -519,10 +519,10 @@ const baseGridScale = {
 };
 const baseLegend = {
   labels: {
-    font: { ...baseFont, size: 11 },
+    font: (ctx) => ({ ...baseFont, size: ctx.chart.width < 450 ? 9 : 11 }),
     color: C.charcoal,
-    boxWidth: 12,
-    padding: 12,
+    boxWidth: 10,
+    padding: 8,
   },
 };
 
@@ -849,24 +849,28 @@ const Dashboard = () => {
           px: 4,
           py: 2.5,
           display: "flex",
-          alignItems: "center",
+          alignItems: { xs: "flex-start", md: "center" },
           justifyContent: "space-between",
+          flexDirection: { xs: "column", md: "row" },
+          gap: { xs: 2, md: 0 },
           borderBottom: `3px solid ${C.red}`,
         }}
       >
         <Box>
-          <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-            <Typography
-              sx={{
-                color: C.white,
-                fontWeight: 900,
-                fontSize: 22,
-                letterSpacing: "0.01em",
-              }}
-            >
-              American Pledge
-            </Typography>
-            <Box sx={{ width: 3, height: 18, bgcolor: C.red, mx: 0.5 }} />
+          <Box sx={{ display: "flex", alignItems: { xs: "flex-start", md: "baseline" }, flexDirection: { xs: "column", md: "row" }, gap: { xs: 0.25, md: 1 } }}>
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                sx={{
+                  color: C.white,
+                  fontWeight: 900,
+                  fontSize: 22,
+                  letterSpacing: "0.01em",
+                }}
+              >
+                American Pledge
+              </Typography>
+              <Box sx={{ width: 3, height: 18, bgcolor: C.red, mx: 0.5, display: { xs: "none", md: "block" } }} />
+            </Box>
             <Typography
               sx={{ color: "#a0b4c8", fontWeight: 400, fontSize: 14 }}
             >
@@ -877,7 +881,7 @@ const Dashboard = () => {
             American Pledge · Housing Finance Infrastructure · {periodLabel}
           </Typography>
         </Box>
-        <Box sx={{ display: "flex", gap: 1.5 }}>
+        <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap", width: { xs: "100%", md: "auto" } }}>
           {[
             {
               label: "Avg Annual IRR",
@@ -908,7 +912,8 @@ const Dashboard = () => {
                 py: 1.25,
                 bgcolor: "#0d2d50",
                 borderRadius: 1,
-                minWidth: 96,
+                flex: { xs: "1 1 calc(50% - 6px)", md: "0 0 auto" },
+                minWidth: { xs: 0, md: 96 },
                 border: `1px solid #1a3d5c`,
               }}
             >
@@ -1171,13 +1176,15 @@ const Dashboard = () => {
               </Card>
 
               {/* Case-Shiller chart */}
-              <Box sx={{ display: "flex", gap: 2 }}>
+              <Box sx={{ display: "flex", gap: 2, flexDirection: { xs: "column", md: "row" } }}>
                 <Card
                   elevation={0}
                   sx={{
                     border: `1px solid ${C.border}`,
                     borderRadius: 1,
                     flex: 1,
+                    minWidth: 0,
+                    width: { xs: "100%", md: "auto" },
                   }}
                 >
                   <CardContent>
@@ -1383,10 +1390,10 @@ const Dashboard = () => {
                 </Card>
 
                 {/* Right 50%: 2 sub-columns */}
-                <Grid item xs={12} md={6}>
-                  <Grid container spacing={2} sx={{ height: "100%" }}>
+                <Box sx={{ flex: 1, minWidth: 0, width: { xs: "100%", md: "auto" } }}>
+                  <Box sx={{ display: "flex", flexDirection: { xs: "column", md: "row" }, gap: 2, height: "100%" }}>
                     {/* Left sub-col: Cumulative Growth → Annual Returns → Risk vs Return */}
-                    <Grid item xs={12} sm={6}>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
                       <Box
                         sx={{
                           display: "flex",
@@ -1556,10 +1563,10 @@ const Dashboard = () => {
                           </CardContent>
                         </Card>
                       </Box>
-                    </Grid>
+                    </Box>
 
                     {/* Right sub-col: Performance vs Benchmarks (tall) + Portfolio Structure */}
-                    <Grid item xs={12} sm={6}>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
                       <Box
                         sx={{
                           display: "flex",
@@ -1778,9 +1785,9 @@ const Dashboard = () => {
                           </CardContent>
                         </Card>
                       </Box>
-                    </Grid>
-                  </Grid>
-                </Grid>
+                    </Box>
+                  </Box>
+                </Box>
               </Box>
 
               {/* KPI stat cards — pinned to bottom of left column */}
@@ -1845,6 +1852,8 @@ const Dashboard = () => {
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "flex-start",
+                flexWrap: "wrap",
+                gap: 1,
                 mb: 1.5,
               }}
             >
@@ -1860,7 +1869,6 @@ const Dashboard = () => {
                   borderRadius: 1,
                   overflow: "hidden",
                   flexShrink: 0,
-                  ml: 2,
                 }}
               >
                 {[
