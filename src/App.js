@@ -543,8 +543,24 @@ const Dashboard = () => {
 
   // ── Build modeling table (recomputed on every yearRange change) ──
   // Cap schedule is relative to the start year (year 1 = first year in range).
-  // Formula: Annual Return = HOME_VALUE Ã— HPA% Ã— Cap + Fees + Bonuses
+  // Formula: Annual Return = homeValue × HPA% × Cap + Fees + Bonuses
+  // Home value compounds each year: homeValue *= (1 + HPA%)
   // Starting capital compounds: next_start = prev_start + annual_return
+
+  // Pre-compute accrued dollars held back in years 1–5.
+  // Accrued per year = homeValue × HPA × (1 − cap) — appreciation the fund retains.
+  // Year 7 bonus = half of total accrued from years 1–5.
+  let preHomeValue = HOME_VALUE;
+  const yr1to5Accrued = displayYears.slice(0, 5).reduce((sum, yr, i) => {
+    const hpa = yr > 2025 ? projectedHPA : getHPA(yr);
+    if (hpa == null) return sum;
+    const cap = CAP_SCHEDULE[i] ?? 1.0;
+    const accrued = preHomeValue * (hpa / 100) * (1 - cap);
+    preHomeValue *= 1 + hpa / 100;
+    return sum + accrued;
+  }, 0);
+  const yr7Bonus = yr1to5Accrued / 2;
+
   let capital = 80000;
   let spComp = 1.0,
     bndComp = 1.0,
@@ -555,8 +571,8 @@ const Dashboard = () => {
       const hpa = projected ? projectedHPA : getHPA(yr);
       if (hpa == null) return null; // skip years with no HPA data
       const cap = CAP_SCHEDULE[i] ?? 1.0; // relative: i=0 → year 1
-      const fees = i < 5 ? 900 : 0; // years 1–5 of any simulation
-      const bonuses = i === 6 ? 8104 : 0; // year 7 only
+      const fees = i < 5 ? (hpa >= 1 ? 900 : 1800) : 0; // $900 if HPA ≥ 1%, else $1,800
+      const bonuses = i === 6 ? yr7Bonus : 0; // year 7 = half of yrs 1–5 accrued
       const annualReturn = HOME_VALUE * (hpa / 100) * cap + fees + bonuses;
       const irr = (annualReturn / capital) * 100;
       const endingCapital = capital + annualReturn;
@@ -1859,7 +1875,7 @@ const Dashboard = () => {
             >
               <SectionHeader
                 title="Historical Modeling Table"
-                sub="Portfolio simulation · Starting capital $80,000 · AmPledge cap schedule · Annual fees $900 (yrs 1–5) · Bonus $8,104 at yr 7"
+                sub="Portfolio simulation · Starting capital $80,000 · AmPledge cap schedule · Fees yrs 1–5: $900 (HPA ≥ 1%, $900 accrues) or $1,800 (HPA < 1%, $0 accrues) · Yr 7 bonus = 50% of accrued dollars"
               />
               <Box
                 sx={{
