@@ -310,18 +310,18 @@ const CS_ANNUAL_USA = Object.fromEntries(
   ]),
 );
 // Override 2016-2025 with exact spreadsheet values
-Object.assign(CS_ANNUAL_USA, {
-  2016: 5.3,
-  2017: 6.3,
-  2018: 5.1,
-  2019: 3.5,
-  2020: 10.4,
-  2021: 18.8,
-  2022: 7.0,
-  2023: 5.5,
-  2024: 4.3,
-  2025: 1.3,
-});
+// Object.assign(CS_ANNUAL_USA, {
+//   2016: 5.3,
+//   2017: 6.3,
+//   2018: 5.1,
+//   2019: 3.5,
+//   2020: 10.4,
+//   2021: 18.8,
+//   2022: 7.0,
+//   2023: 5.5,
+//   2024: 4.3,
+//   2025: 1.3,
+// });
 const getHPA = (yr) => CS_ANNUAL_USA[yr] ?? null;
 
 const CITY_COLORS = {
@@ -873,7 +873,14 @@ const Dashboard = () => {
         }}
       >
         <Box>
-          <Box sx={{ display: "flex", alignItems: { xs: "flex-start", md: "baseline" }, flexDirection: { xs: "column", md: "row" }, gap: { xs: 0.25, md: 1 } }}>
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: { xs: "flex-start", md: "baseline" },
+              flexDirection: { xs: "column", md: "row" },
+              gap: { xs: 0.25, md: 1 },
+            }}
+          >
             <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
               <Typography
                 sx={{
@@ -885,7 +892,15 @@ const Dashboard = () => {
               >
                 American Pledge
               </Typography>
-              <Box sx={{ width: 3, height: 18, bgcolor: C.red, mx: 0.5, display: { xs: "none", md: "block" } }} />
+              <Box
+                sx={{
+                  width: 3,
+                  height: 18,
+                  bgcolor: C.red,
+                  mx: 0.5,
+                  display: { xs: "none", md: "block" },
+                }}
+              />
             </Box>
             <Typography
               sx={{ color: "#a0b4c8", fontWeight: 400, fontSize: 14 }}
@@ -897,7 +912,14 @@ const Dashboard = () => {
             American Pledge · Housing Finance Infrastructure · {periodLabel}
           </Typography>
         </Box>
-        <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap", width: { xs: "100%", md: "auto" } }}>
+        <Box
+          sx={{
+            display: "flex",
+            gap: 1.5,
+            flexWrap: "wrap",
+            width: { xs: "100%", md: "auto" },
+          }}
+        >
           {[
             {
               label: "Avg Annual IRR",
@@ -1192,7 +1214,13 @@ const Dashboard = () => {
               </Card>
 
               {/* Case-Shiller chart */}
-              <Box sx={{ display: "flex", gap: 2, flexDirection: { xs: "column", md: "row" } }}>
+              <Box
+                sx={{
+                  display: "flex",
+                  gap: 2,
+                  flexDirection: { xs: "column", md: "row" },
+                }}
+              >
                 <Card
                   elevation={0}
                   sx={{
@@ -1406,8 +1434,21 @@ const Dashboard = () => {
                 </Card>
 
                 {/* Right 50%: 2 sub-columns */}
-                <Box sx={{ flex: 1, minWidth: 0, width: { xs: "100%", md: "auto" } }}>
-                  <Box sx={{ display: "flex", flexDirection: { xs: "column", md: "row" }, gap: 2, height: "100%" }}>
+                <Box
+                  sx={{
+                    flex: 1,
+                    minWidth: 0,
+                    width: { xs: "100%", md: "auto" },
+                  }}
+                >
+                  <Box
+                    sx={{
+                      display: "flex",
+                      flexDirection: { xs: "column", md: "row" },
+                      gap: 2,
+                      height: "100%",
+                    }}
+                  >
                     {/* Left sub-col: Cumulative Growth → Annual Returns → Risk vs Return */}
                     <Box sx={{ flex: 1, minWidth: 0 }}>
                       <Box
