@@ -570,7 +570,7 @@ const BulletRow = ({ label, value, benchmarks, max }) => {
         <Typography sx={{ fontSize: 11, fontWeight: 600, color: C.charcoal }}>
           {label}
         </Typography>
-        <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.red }}>
+        <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.navyDark }}>
           {value.toFixed(2)}%
         </Typography>
       </Box>
@@ -605,7 +605,7 @@ const BulletRow = ({ label, value, benchmarks, max }) => {
             top: "25%",
             height: "50%",
             width: pct(value),
-            bgcolor: C.red,
+            bgcolor: C.navyDark,
             borderRadius: "0 3px 3px 0",
             zIndex: 1,
           }}
