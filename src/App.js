@@ -2935,6 +2935,14 @@ const Dashboard = () => {
                             </Box>
                           </Box>
                           </Box>
+                          <Box sx={{ mb: 1.5, p: 1.25, background: C.navy + "08", borderRadius: 1, borderLeft: `3px solid ${C.greenLight}` }}>
+                            <Typography sx={{ fontSize: 11, color: C.charcoal, lineHeight: 1.65 }}>
+                              <strong>Kalshi</strong> is a regulated U.S. prediction market exchange where participants trade contracts on real-world outcomes — including economic indicators, Fed decisions, and housing metrics.
+                              {" "}Unlike surveys or analyst forecasts, Kalshi prices reflect <strong>actual money at risk</strong>: traders profit only when they're right, creating a powerful incentive for accuracy.
+                              {" "}Academic research consistently shows prediction markets outperform traditional forecasting models, especially near data release dates when informed participants concentrate.
+                              {" "}The values below represent the <strong>market-implied median</strong> for each metric — the threshold where the crowd collectively assigns a 50/50 probability — providing an independent, real-time cross-check on the outlook above.
+                            </Typography>
+                          </Box>
                           {kalshiError && (
                             <Typography sx={{ fontSize: 11, color: "#e57373" }}>
                               Unable to load prediction market data: {kalshiError}
