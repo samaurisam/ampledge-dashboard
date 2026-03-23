@@ -6,8 +6,10 @@ import {
   Typography,
   Box,
   Slider,
+  Skeleton,
 } from "@mui/material";
 import { CS_DATES, CS_HPA } from "./caseShillerData";
+import kalshiLogo from "./kalshi.svg";
 import {
   Chart as ChartJS,
   LineElement,
@@ -892,6 +894,185 @@ const pearsonR = (xs, ys) => {
 };
 
 // ─── Dashboard ─────────────────────────────────────────────────────────────
+// ── Kalshi helpers ──────────────────────────────────────────────────────────
+// Returns { value, prefix, closeDate } where prefix is "<" or ">" when the median is
+// outside the range of tracked thresholds, or "" when interpolated cleanly.
+// When markets span multiple resolution dates (e.g. KXFED across meetings),
+// only the nearest upcoming date's markets are used.
+const kalshiMedian = (markets) => {
+  if (!markets || markets.length === 0) return null;
+
+  // Group by close_time — use only the nearest date to avoid mixing probability curves
+  const byDate = {};
+  for (const m of markets) {
+    const d = m.close_time ?? "unknown";
+    if (!byDate[d]) byDate[d] = [];
+    byDate[d].push(m);
+  }
+  const nearestDate = Object.keys(byDate).filter(d => d !== "unknown").sort()[0] ?? "unknown";
+  const cohort = byDate[nearestDate] ?? markets;
+
+  const parsed = cohort
+    .map((m) => {
+      const match = m.ticker.match(/-T(-?[\d.]+)$/);
+      if (!match) return null;
+      // Coerce to numbers — Kalshi API may return strings for bid/ask/last
+      const bid = parseFloat(m.yes_bid);
+      const ask = parseFloat(m.yes_ask);
+      const lp  = parseFloat(m.last_price);
+      const spread = ask - bid;
+      const price = spread > 0.25 && !isNaN(lp) && lp > 0 ? lp : (bid + ask) / 2;
+      if (isNaN(price)) return null;
+      return { threshold: parseFloat(match[1]), price };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.threshold - b.threshold);
+
+  if (parsed.length === 0) return null;
+
+  // Find where price crosses 0.50 (markets are "above X?" so probability descends with threshold)
+  for (let i = 0; i < parsed.length - 1; i++) {
+    const lo = parsed[i], hi = parsed[i + 1];
+    if (lo.price >= 0.5 && hi.price < 0.5) {
+      const t = (lo.price - 0.5) / (lo.price - hi.price);
+      return { value: lo.threshold + t * (hi.threshold - lo.threshold), prefix: "", closeDate: nearestDate, cohortCount: cohort.length };
+    }
+  }
+  if (parsed[parsed.length - 1].price >= 0.5)
+    return { value: parsed[parsed.length - 1].threshold, prefix: ">", closeDate: nearestDate, cohortCount: cohort.length };
+  return { value: parsed[0].threshold, prefix: "<", closeDate: nearestDate, cohortCount: cohort.length };
+};
+
+// Generates a 1-2 sentence validation note comparing Kalshi consensus to the model's outlook
+const kalshiValidationNote = (kalshiData, mktTone) => {
+  if (!kalshiData?.series) return null;
+
+  const getMedian = (series) => kalshiMedian(kalshiData.series[series]?.markets ?? []);
+
+  const mtg  = getMedian("KXMORTGAGERATE");
+  const fed  = getMedian("KXFED");
+  const cpi  = getMedian("KXCPIYOY");
+  const eh   = getMedian("KXEHSALES");
+  const hv   = getMedian("KXUSHOMEVAL");
+
+  // Score each available signal: +1 = housing positive, -1 = headwind, 0 = neutral
+  const signals = [];
+  if (mtg)  signals.push(mtg.value < 6.5 ? 1 : mtg.value < 7.0 ? 0 : -1);
+  if (fed)  signals.push(fed.value < 4.0 ? 1 : fed.value < 4.75 ? 0 : -1);
+  if (cpi)  signals.push(cpi.value < 2.8 ? 1 : cpi.value < 3.3 ? 0 : -1);
+  if (eh)   signals.push(eh.value > 4.3 ? 1 : eh.value > 3.9 ? 0 : -1);
+  if (hv)   signals.push(hv.value > 362000 ? 1 : hv.value > 355000 ? 0 : -1);
+
+  if (signals.length === 0) return null;
+
+  const avg = signals.reduce((a, b) => a + b, 0) / signals.length;
+  const modelFavorable = mktTone.includes("favorable");
+  const modelChallenging = mktTone.includes("challenging");
+  const kalshiFavorable = avg > 0.2;
+  const kalshiChallenging = avg < -0.2;
+  const aligned = (modelFavorable && kalshiFavorable) || (modelChallenging && kalshiChallenging) || (!modelFavorable && !modelChallenging && !kalshiFavorable && !kalshiChallenging);
+
+  // Build a short list of the most notable signals to name-drop
+  const notable = [];
+  if (mtg)  notable.push(`mortgage rates ${mtg.prefix}${mtg.value.toFixed(2)}%`);
+  if (eh)   notable.push(`existing sales ${eh.prefix}${eh.value.toFixed(2)}M`);
+  if (cpi)  notable.push(`CPI at ${cpi.prefix}${cpi.value.toFixed(1)}%`);
+  if (hv)   notable.push(`home values ${hv.prefix}$${Math.round(hv.value / 1000)}k`);
+
+  const notableStr = notable.slice(0, 3).join(", ");
+
+  if (aligned) {
+    return `Kalshi prediction markets broadly validate this outlook — consensus prices ${notableStr}, consistent with a ${mktTone} environment.`;
+  } else if (kalshiFavorable && !modelFavorable) {
+    return `Kalshi prediction markets offer a more optimistic cross-check than the model signals — consensus prices ${notableStr}, suggesting potential upside relative to the current ${mktTone} assessment.`;
+  } else if (kalshiChallenging && !modelChallenging) {
+    return `Kalshi prediction markets offer a cautionary cross-check — consensus prices ${notableStr}, suggesting more headwind than the current ${mktTone} assessment implies.`;
+  } else {
+    return `Kalshi prediction markets offer a mixed cross-check — ${notableStr} — partially supporting and partially challenging the current ${mktTone} outlook.`;
+  }
+};
+
+// Generates a contextual narrative from resolved Kalshi tile data
+const kalshiSummary = (tiles) => {
+  const get = (series) => tiles.find((t) => t.series === series);
+  const val = (series) => get(series)?.median?.value ?? null;
+  const pfx = (series) => get(series)?.median?.prefix ?? "";
+  const has = (series) => get(series)?.median != null;
+
+  const sentences = [];
+
+  // ── Rate environment ──
+  const fedVal  = val("KXFED");
+  const mortVal = val("KXMORTGAGERATE");
+  if (has("KXFED") || has("KXMORTGAGERATE")) {
+    const fedPart  = has("KXFED")          ? `Fed Funds at ${pfx("KXFED")}${fedVal.toFixed(2)}%`             : null;
+    const mortPart = has("KXMORTGAGERATE") ? `30-yr mortgage rate ${pfx("KXMORTGAGERATE")}${mortVal.toFixed(2)}%` : null;
+    const rateDesc = [fedPart, mortPart].filter(Boolean).join(" and ");
+    const easing   = fedVal != null && fedVal < 4.25;
+    const mortTight = mortVal != null && mortVal >= 6.5;
+    sentences.push(
+      `Markets imply ${rateDesc} — ${easing ? "suggesting continued Fed easing" : "with rates holding near current levels"}${mortTight ? ", keeping affordability under pressure" : ", offering modest affordability improvement for buyers"}.`
+    );
+  }
+
+  // ── Inflation ──
+  const cpi = val("KXCPIYOY");
+  if (has("KXCPIYOY")) {
+    const cpiDesc = cpi > 3.5 ? "well above the Fed's 2% target, limiting room for aggressive cuts"
+      : cpi > 2.8 ? "still above the Fed's 2% target, supporting a gradual easing path"
+      : "approaching the Fed's 2% target, consistent with continued normalization";
+    sentences.push(`CPI inflation consensus is ${pfx("KXCPIYOY")}${cpi.toFixed(1)}% YoY — ${cpiDesc}.`);
+  }
+
+  // ── Labor market ──
+  const u3 = val("KXU3");
+  if (has("KXU3")) {
+    const laborDesc = u3 < 4.5 ? "a still-healthy labor market supporting buyer income and demand"
+      : u3 < 5.5 ? "a softening labor market that may begin to weigh on buyer confidence"
+      : "a deteriorating labor market that poses a meaningful demand headwind";
+    sentences.push(`Unemployment is projected at ${pfx("KXU3")}${u3.toFixed(1)}%, indicating ${laborDesc}.`);
+  }
+
+  // ── Transaction activity ──
+  const ehVal  = val("KXEHSALES");
+  const nhVal  = val("KXNHSALES");
+  const stVal  = val("KXHOUSINGSTART");
+  const activityParts = [];
+  if (has("KXEHSALES"))      activityParts.push(`existing sales ${pfx("KXEHSALES")}${ehVal.toFixed(2)}M`);
+  if (has("KXNHSALES"))      activityParts.push(`new home sales ${pfx("KXNHSALES")}${Math.round(nhVal)}k`);
+  if (has("KXHOUSINGSTART")) activityParts.push(`starts ${pfx("KXHOUSINGSTART")}${stVal.toFixed(3)}M`);
+  if (activityParts.length > 0) {
+    const weak = (ehVal != null && ehVal < 4.2) || (nhVal != null && nhVal < 650);
+    sentences.push(
+      `Housing activity consensus: ${activityParts.join(", ")} — ${weak ? "pointing to continued transaction weakness driven by the lock-in effect and affordability constraints" : "suggesting a gradual pickup in market activity"}.`
+    );
+  }
+
+  // ── Home value ──
+  const hvVal = val("KXUSHOMEVAL");
+  if (has("KXUSHOMEVAL")) {
+    const hvDesc = hvVal > 365000 ? "reflecting continued price resilience despite affordability headwinds"
+      : hvVal > 355000 ? "suggesting modest but positive home value appreciation"
+      : "implying flat-to-declining home values in the near term";
+    sentences.push(`The Zillow ZHVI is priced at ${pfx("KXUSHOMEVAL")}$${Math.round(hvVal / 1000)}k for March 2026, ${hvDesc}.`);
+  }
+
+  return sentences.length > 0 ? sentences.join(" ") : null;
+};
+
+// Map Kalshi series → dashboard metric label
+const KALSHI_SERIES_META = {
+  KXUSHOMEVAL:    { label: "US Home Value (ZHVI)",  unit: "$k", decimals: 0, housingSignal: (v) => v > 362000 ? 1 : v > 355000 ? 0 : -1 },
+  KXMORTGAGERATE: { label: "30-yr Mortgage Rate",  unit: "%",  decimals: 2, housingSignal: (v) => v < 6.5   ? 1 : v < 7.0    ? 0 : -1 },
+  KXFED:          { label: "Fed Funds Rate",        unit: "%",  decimals: 2, housingSignal: (v) => v < 4.0   ? 1 : v < 4.75   ? 0 : -1 },
+  KXCPIYOY:       { label: "CPI (YoY)",             unit: "%",  decimals: 1, housingSignal: (v) => v < 2.8   ? 1 : v < 3.3    ? 0 : -1 },
+  KXCPI:          { label: "CPI (MoM)",             unit: "%",  decimals: 2, housingSignal: (v) => v < 0.2   ? 1 : v < 0.4    ? 0 : -1 },
+  KXU3:           { label: "Unemployment Rate",     unit: "%",  decimals: 1, housingSignal: (v) => v < 4.0   ? 1 : v < 5.0    ? 0 : -1 },
+  KXEHSALES:      { label: "Existing Home Sales",   unit: "M",  decimals: 2, housingSignal: (v) => v > 4.3   ? 1 : v > 3.9    ? 0 : -1 },
+  KXHOUSINGSTART: { label: "Housing Starts",        unit: "M",  decimals: 3, housingSignal: (v) => v > 1.4   ? 1 : v > 1.2    ? 0 : -1 },
+  KXNHSALES:      { label: "New Home Sales",        unit: "k",  decimals: 0, housingSignal: (v) => v > 700   ? 1 : v > 600    ? 0 : -1 },
+};
+
 const Dashboard = () => {
   const [yearRange, setYearRange] = useState([2016, 2025]);
   const [selectedCity, setSelectedCity] = useState(null); // null = USA highlighted only
@@ -899,6 +1080,31 @@ const Dashboard = () => {
   const [chartPane, setChartPane] = useState("portfolio"); // 'portfolio' | 'housing'
   const [scenario, setScenario] = useState("base"); // 'bear' | 'base' | 'bull'
   const [ampledgeEnabled, setAmpledgeEnabled] = useState(false);
+  const [kalshiData, setKalshiData] = useState(null);   // { series: {KXFED: {markets:[...]}, ...}, fetched_at }
+  const [kalshiError, setKalshiError] = useState(null);
+  const [kalshiRefreshKey, setKalshiRefreshKey] = useState(0);
+
+  // Fetch Kalshi prediction market data once when Housing Market tab is first visited
+  const kalshiFetchedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (chartPane !== "housing") return;
+    if (kalshiFetchedRef.current) return;
+    kalshiFetchedRef.current = true;
+    const base = process.env.REACT_APP_KALSHI_API_URL || "https://5g28uduwbk.execute-api.us-east-1.amazonaws.com/markets";
+    const seriesList = Object.keys(KALSHI_SERIES_META).join(",");
+    const url = `${base}?series=${seriesList}`;
+    fetch(url)
+      .then((r) => r.json())
+      .then((data) => setKalshiData(data))
+      .catch((err) => { kalshiFetchedRef.current = false; setKalshiError(err.message); });
+  }, [chartPane, kalshiRefreshKey]);
+
+  const refreshKalshi = () => {
+    kalshiFetchedRef.current = false;
+    setKalshiData(null);
+    setKalshiError(null);
+    setKalshiRefreshKey((k) => k + 1);
+  };
 
   // All years in the selected range
   const displayYears = [];
@@ -1558,6 +1764,25 @@ const Dashboard = () => {
     ticks: { ...baseGridScale.ticks, callback: (v) => v + "%" },
   };
 
+  // ── Housing chart tooltip helpers ──────────────────────────────────────────
+  const mkHTip = (fmtFn) => ({
+    ...baseTooltip,
+    mode: "index",
+    intersect: false,
+    callbacks: {
+      label: (ctx) => {
+        const v = ctx.parsed.y;
+        return v == null ? null : ` ${ctx.dataset.label}: ${fmtFn(ctx.dataset.label, v)}`;
+      },
+    },
+  });
+  const hRatesTip    = mkHTip((_l, v) => v.toFixed(2) + "%");
+  const hStressTip   = mkHTip((_l, v) => v.toFixed(2) + "%");
+  const hSupplyTip   = mkHTip((l,  v) => l === "Months of Supply" ? v.toFixed(1) + " mo" : Math.round(v) + "k");
+  const hDemandTip   = mkHTip((l,  v) => l.includes("(M)") ? v.toFixed(2) + "M" : Math.round(v) + "k");
+  const hAffordTip   = mkHTip((l,  v) => l === "Price / Income" ? v.toFixed(1) + "×" : v.toFixed(1) + "%");
+  const hSentimentTip = mkHTip((_l, v) => Math.round(v).toString());
+
   return (
     <Box
       sx={{
@@ -1794,7 +2019,6 @@ const Dashboard = () => {
                   sx={{
                     border: `1px solid ${C.border}`,
                     borderRadius: 1,
-                    flex: 1,
                     minWidth: 0,
                     width: { xs: "100%", md: "auto" },
                   }}
@@ -2039,7 +2263,7 @@ const Dashboard = () => {
                       <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                         <CardContent>
                           <SectionHeader title="Rates & Policy" sub="Fed funds · mortgage rate · 10yr Treasury" />
-                          <Line data={hRatesData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: baseTooltip }, scales: { x: baseGridScale, y: { ...baseGridScale, ticks: { ...baseGridScale.ticks, callback: (v) => v + "%" } } } }} />
+                          <Line data={hRatesData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: hRatesTip }, scales: { x: baseGridScale, y: { ...baseGridScale, ticks: { ...baseGridScale.ticks, callback: (v) => v + "%" } } } }} />
                           <Insight>
                             Mortgage rates at <strong>{iMtg?.toFixed(2)}%</strong> carry a {spread && <strong>{spread}pp</strong>} premium over Fed Funds
                             {iTsy != null && iFed != null && iTsy < iFed ? ", with an inverted yield curve signaling near-term economic stress" : ""}.
@@ -2064,7 +2288,7 @@ const Dashboard = () => {
                       <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                         <CardContent>
                           <SectionHeader title="Market Stress" sub="Unemployment · delinquency · foreclosure rate" />
-                          <Line data={hStressData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: baseTooltip }, scales: { x: baseGridScale, y: { ...baseGridScale, ticks: { ...baseGridScale.ticks, callback: (v) => v + "%" } } } }} />
+                          <Line data={hStressData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: hStressTip }, scales: { x: baseGridScale, y: { ...baseGridScale, ticks: { ...baseGridScale.ticks, callback: (v) => v + "%" } } } }} />
                           <Insight>
                             Delinquency at <strong>{iDel?.toFixed(1)}%</strong> and foreclosure inventory at <strong>{iFcl?.toFixed(1)}%</strong> remain historically moderate.
                             {" "}Low distressed supply acts as a price floor — without forced sellers, there is no mechanism to push prices sharply lower.
@@ -2089,7 +2313,7 @@ const Dashboard = () => {
                       <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                         <CardContent>
                           <SectionHeader title="Demand" sub="Existing home sales (M, left) · net household formation (000s, right)" />
-                          <Bar data={hDemandData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: baseTooltip }, scales: { x: baseGridScale, y: { ...baseGridScale, position: "left", ticks: { ...baseGridScale.ticks, callback: (v) => v + "M" } }, y1: { ...baseGridScale, position: "right", grid: { drawOnChartArea: false }, ticks: { ...baseGridScale.ticks, callback: (v) => v + "k" } } } }} />
+                          <Bar data={hDemandData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: hDemandTip }, scales: { x: baseGridScale, y: { ...baseGridScale, position: "left", ticks: { ...baseGridScale.ticks, callback: (v) => v + "M" } }, y1: { ...baseGridScale, position: "right", grid: { drawOnChartArea: false }, ticks: { ...baseGridScale.ticks, callback: (v) => v + "k" } } } }} />
                           <Insight>
                             Existing home sales at <strong>{iSales?.toFixed(2)}M</strong> are near a <strong style={{ color: C.red }}>28-year low</strong> (4.06M in 2024, weakest since 1995).
                             {" "}The primary cause is the <em>mortgage rate lock-in effect</em> — an estimated ~40% of outstanding mortgages carry rates below 4%, making selling at 6–7%+ rates economically punishing.
@@ -2116,7 +2340,7 @@ const Dashboard = () => {
                       <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                         <CardContent>
                           <SectionHeader title="Supply Pipeline" sub="Permits · starts (k, left) · months of supply (right)" />
-                          <Bar data={hSupplyData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: baseTooltip }, scales: { x: baseGridScale, y: { ...baseGridScale, position: "left", ticks: { ...baseGridScale.ticks, callback: (v) => v + "k" } }, y1: { ...baseGridScale, position: "right", grid: { drawOnChartArea: false }, ticks: { ...baseGridScale.ticks, callback: (v) => v + "mo" } } } }} />
+                          <Bar data={hSupplyData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: hSupplyTip }, scales: { x: baseGridScale, y: { ...baseGridScale, position: "left", ticks: { ...baseGridScale.ticks, callback: (v) => v + "k" } }, y1: { ...baseGridScale, position: "right", grid: { drawOnChartArea: false }, ticks: { ...baseGridScale.ticks, callback: (v) => v + "mo" } } } }} />
                           <Insight>
                             At <strong>{iSupply?.toFixed(1)} months</strong> of supply, the market is in a <strong>{supplyTone}</strong> ({"<"}3 = seller's, {">"}6 = buyer's).
                             {" "}Permits at <strong>{iPermit?.toFixed(0)}k</strong> remain {iPermit != null && iPermit < 1200 ? "below the ~1.2M units/yr required to absorb household formation, sustaining the structural undersupply that has underpinned prices since 2012" : "near the level needed to absorb new household formation"}.
@@ -2139,7 +2363,7 @@ const Dashboard = () => {
                       <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                         <CardContent>
                           <SectionHeader title="Affordability & Ownership" sub="Price/income (left) · homeownership % · rental vacancy % (right)" />
-                          <Line data={hAffordabilityData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: baseTooltip }, scales: { x: baseGridScale, y: { ...baseGridScale, position: "left", min: 3.5, suggestedMax: 8, ticks: { ...baseGridScale.ticks, callback: (v) => v.toFixed(1) + "×" } }, y1: { ...baseGridScale, position: "right", min: 0, suggestedMax: 80, grid: { drawOnChartArea: false }, ticks: { ...baseGridScale.ticks, callback: (v) => v + "%" } } } }} />
+                          <Line data={hAffordabilityData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: hAffordTip }, scales: { x: baseGridScale, y: { ...baseGridScale, position: "left", min: 3.5, suggestedMax: 8, ticks: { ...baseGridScale.ticks, callback: (v) => v.toFixed(1) + "×" } }, y1: { ...baseGridScale, position: "right", min: 0, suggestedMax: 80, grid: { drawOnChartArea: false }, ticks: { ...baseGridScale.ticks, callback: (v) => v + "%" } } } }} />
                           <Insight>
                             Price-to-income at <strong>{iPTI?.toFixed(1)}×</strong> is {iPTI != null && iPTI > 4.5 ? <><strong style={{ color: C.red }}>well above</strong> the 40-year average of ~3.8×</> : "near the long-run average of ~3.8×"}, reflecting a structurally stretched affordability environment.
                             {" "}Homeownership at <strong>{iOwn?.toFixed(1)}%</strong> has held stable, confirming that existing owners are staying put rather than trading — compressing turnover and keeping effective inventory low.
@@ -2162,7 +2386,7 @@ const Dashboard = () => {
                       <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                         <CardContent>
                           <SectionHeader title="Sentiment" sub="Consumer confidence (left) · NAHB builder confidence (right)" />
-                          <Line data={hSentimentData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: baseTooltip }, scales: { x: baseGridScale, y: { ...baseGridScale, position: "left" }, y1: { ...baseGridScale, position: "right", grid: { drawOnChartArea: false }, ticks: { ...baseGridScale.ticks, callback: (v) => v } } } }} />
+                          <Line data={hSentimentData} options={{ responsive: true, plugins: { legend: baseLegend, tooltip: hSentimentTip }, scales: { x: baseGridScale, y: { ...baseGridScale, position: "left" }, y1: { ...baseGridScale, position: "right", grid: { drawOnChartArea: false }, ticks: { ...baseGridScale.ticks, callback: (v) => v } } } }} />
                           <Insight>
                             NAHB builder confidence at <strong>{iNAHB}</strong> {iNAHB != null && iNAHB < 50 ? <><strong style={{ color: C.red }}>below 50</strong> — more builders view conditions as poor than good, signaling continued reluctance to add supply</> : <><strong style={{ color: C.greenLight }}>above 50</strong> — builders are net-optimistic, likely to expand supply</>}.
                             {" "}Consumer confidence at <strong>{iCC}</strong> {iCC != null && iCC > 100 ? "reflects healthy household sentiment supportive of major purchase decisions" : "reflects cautious households more likely to delay discretionary home purchases"}.
@@ -2662,6 +2886,7 @@ const Dashboard = () => {
                           {" "}paint a {mktTone} backdrop for appreciation.
                           {mktStrongHeadwinds.length > 0 && <> Key headwinds include <em>{mktStrongHeadwinds.slice(0, 2).map((d) => d.label).join(" and ")}</em>.</>}
                           {mktStrongTailwinds.length > 0 && <> Supporting factors include <em>{mktStrongTailwinds.slice(0, 2).map((d) => d.label).join(" and ")}</em>.</>}
+                          {(() => { const note = kalshiValidationNote(kalshiData, mktTone); return note ? <><br /><br />{note}</> : null; })()}
                         </Typography>
 
                         {/* Forward outlook table */}
@@ -2679,7 +2904,7 @@ const Dashboard = () => {
                                 const ol = outlookLabel(avg);
                                 const oc = outlookColor(avg);
                                 return (
-                                  <Box key={label} sx={{ flex: "1 1 120px", border: `1px solid ${C.border}`, borderRadius: 1, p: 1, minWidth: 110 }}>
+                                  <Box key={label} sx={{ flex: "1 1 120px", border: `1px solid ${oc}44`, borderRadius: 1, p: 1, minWidth: 110, background: oc + "18" }}>
                                     <Typography sx={{ fontSize: 10, color: C.muted, fontWeight: 600, mb: 0.25 }}>{label}</Typography>
                                     <Typography sx={{ fontSize: 18, fontWeight: 700, color: oc, lineHeight: 1.1 }}>{avg.toFixed(1)}%</Typography>
                                     <Typography sx={{ fontSize: 10, color: C.muted }}>avg HPA/yr</Typography>
@@ -2692,6 +2917,112 @@ const Dashboard = () => {
                         )}
                       </CardContent>
                     </Card>
+
+                    {/* ── Prediction Market Signals (Kalshi) ── */}
+                    <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                        <CardContent sx={{ pb: "12px !important" }}>
+                          <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start", mb: 1.5 }}>
+                            <img src={kalshiLogo} alt="Kalshi" style={{ height: 18, width: "auto", marginBottom: 6, filter: "brightness(0) saturate(100%) invert(58%) sepia(61%) saturate(428%) hue-rotate(113deg) brightness(96%) contrast(91%)" }} />
+                          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+                            <SectionHeader title="Prediction Market Signals" sub="Market-implied consensus from Kalshi · next data release" />
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                              {kalshiData?.fetched_at && (
+                                <Typography sx={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>
+                                  Updated {new Date(kalshiData.fetched_at).toLocaleTimeString()}
+                                </Typography>
+                              )}
+                              <button onClick={refreshKalshi} title="Refresh market data" style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", padding: "2px 7px", fontSize: 13, color: C.muted, lineHeight: 1 }}>⟳</button>
+                            </Box>
+                          </Box>
+                          </Box>
+                          {kalshiError && (
+                            <Typography sx={{ fontSize: 11, color: "#e57373" }}>
+                              Unable to load prediction market data: {kalshiError}
+                            </Typography>
+                          )}
+                          {!kalshiData && !kalshiError && (
+                            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.5 }}>
+                              {Object.keys(KALSHI_SERIES_META).map((series) => (
+                                <Box key={series} sx={{ flex: "1 1 140px", minWidth: 130, border: `1px solid ${C.border}`, borderRadius: 1, p: 1 }}>
+                                  <Skeleton variant="text" width="70%" height={14} sx={{ mb: 0.5 }} />
+                                  <Skeleton variant="text" width="50%" height={28} sx={{ mb: 0.25 }} />
+                                  <Skeleton variant="text" width="60%" height={12} />
+                                  <Skeleton variant="text" width="80%" height={10} />
+                                </Box>
+                              ))}
+                            </Box>
+                          )}
+                          {kalshiData?.series && (() => {
+                            const tiles = Object.entries(KALSHI_SERIES_META).map(([series, meta]) => {
+                              const markets = kalshiData.series[series]?.markets ?? [];
+                              const medianResult = kalshiMedian(markets);
+                              const closeDate = medianResult?.closeDate
+                                ? new Date(medianResult.closeDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+                                : null;
+                              return { series, meta, median: medianResult, closeDate, count: markets.length };
+                            });
+                            return (
+                              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.5 }}>
+                                {tiles.map(({ series, meta, median: m, closeDate, count }) => {
+                                  const sig = m != null && meta.housingSignal ? meta.housingSignal(m.value) : null;
+                                  const sigColor = sig === 1 ? C.greenLight : sig === -1 ? "#e57373" : null;
+                                  return (
+                                  <Box key={series} sx={{ flex: "1 1 140px", minWidth: 130, border: `1px solid ${sigColor ? sigColor + "55" : C.border}`, borderRadius: 1, p: 1, background: sigColor ? sigColor + "0d" : "transparent" }}>
+                                    <Typography sx={{ fontSize: 10, color: C.muted, fontWeight: 600, mb: 0.25 }}>{meta.label}</Typography>
+                                    {m != null ? (
+                                      <>
+                                        <Typography sx={{ fontSize: 20, fontWeight: 700, color: sigColor ?? C.navy, lineHeight: 1.1 }}>
+                                          {m.prefix}
+                                          {meta.unit === "k"
+                                            ? Math.round(m.value) + "k"
+                                            : meta.unit === "$k"
+                                            ? "$" + Math.round(m.value / 1000) + "k"
+                                            : m.value.toFixed(meta.decimals) + meta.unit}
+                                        </Typography>
+                                        <Typography sx={{ fontSize: 10, color: C.muted }}>
+                                          {m.prefix ? "boundary estimate" : "market median"}
+                                        </Typography>
+                                        {closeDate && (
+                                          <Typography sx={{ fontSize: 9, color: C.muted, mt: 0.25, fontStyle: "italic" }}>
+                                            closes {closeDate} · {m.cohortCount ?? count} markets
+                                          </Typography>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <Typography sx={{ fontSize: 12, color: C.muted, fontStyle: "italic" }}>
+                                        {count === 0 ? "No open markets" : "Insufficient data"}
+                                      </Typography>
+                                    )}
+                                  </Box>
+                                ); })}
+                              </Box>
+                            );
+                          })()}
+                          {(() => {
+                            if (!kalshiData?.series) return null;
+                            const tiles = Object.entries(KALSHI_SERIES_META).map(([series, meta]) => {
+                              const markets = kalshiData.series[series]?.markets ?? [];
+                              return { series, meta, median: kalshiMedian(markets), count: markets.length };
+                            });
+                            const summary = kalshiSummary(tiles);
+                            return summary ? (
+                              <Box sx={{ mt: 1.5, pt: 1.5, borderTop: `1px solid ${C.border}` }}>
+                                <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.5 }}>
+                                  Market Consensus Summary
+                                </Typography>
+                                <Typography sx={{ fontSize: 12, color: C.navyDark, lineHeight: 1.65 }}>
+                                  {summary}
+                                </Typography>
+                              </Box>
+                            ) : null;
+                          })()}
+                          <Typography sx={{ fontSize: 10, color: C.muted, mt: 1.25, fontStyle: "italic" }}>
+                            Median derived from Kalshi binary market mid-prices (threshold where yes probability ≈ 50%).
+                            {" "}Not investment advice. Source: Kalshi.com
+                          </Typography>
+                        </CardContent>
+                      </Card>
+
 
                     <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                       <CardContent>
@@ -2706,7 +3037,11 @@ const Dashboard = () => {
                               </tr>
                             </thead>
                             <tbody>
-                              {driverCorrelations.map(({ label, r, interp, signal }, i) => {
+                              {[...driverCorrelations].sort((a, b) => {
+                                if (b.signal !== a.signal) return b.signal - a.signal;
+                                if (a.signal === -1) return Math.abs(a.r) - Math.abs(b.r);
+                                return Math.abs(b.r) - Math.abs(a.r);
+                              }).map(({ label, r, interp, signal }, i) => {
                                 const absR = Math.abs(r);
                                 const rColor = r >= 0 ? C.greenLight : "#e57373";
                                 // Signal strength folds in correlation magnitude:
