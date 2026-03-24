@@ -3018,7 +3018,7 @@ const Dashboard = () => {
                                 <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.5 }}>
                                   Market Consensus Summary
                                 </Typography>
-                                <Typography sx={{ fontSize: 12, color: C.navyDark, lineHeight: 1.65 }}>
+                                <Typography sx={{ fontSize: 10, color: C.navyDark, lineHeight: 1.65 }}>
                                   {summary}
                                 </Typography>
                               </Box>
