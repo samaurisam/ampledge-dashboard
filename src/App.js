@@ -1086,6 +1086,7 @@ const Dashboard = () => {
   const [kalshiError, setKalshiError] = useState(null);
   const [kalshiLoading, setKalshiLoading] = useState(false);
   const [kalshiRefreshKey, setKalshiRefreshKey] = useState(0);
+  const [policyWatchData, setPolicyWatchData] = useState(null);
 
   // Fetch Kalshi prediction market data once when Housing Market tab is first visited
   const kalshiFetchedRef = React.useRef(false);
@@ -1107,8 +1108,21 @@ const Dashboard = () => {
     kalshiFetchedRef.current = false;
     setKalshiData(null);
     setKalshiError(null);
+    setPolicyWatchData(null);
     setKalshiRefreshKey((k) => k + 1);
   };
+
+  // Fetch kxhfhousing-27 policy watch market once
+  const policyWatchRef = React.useRef(false);
+  React.useEffect(() => {
+    if (policyWatchRef.current) return;
+    policyWatchRef.current = true;
+    const base = process.env.REACT_APP_KALSHI_API_URL || "https://5g28uduwbk.execute-api.us-east-1.amazonaws.com/markets";
+    fetch(`${base}?market=kxhfhousing-27`)
+      .then((r) => r.json())
+      .then((d) => { if (!d.error) setPolicyWatchData(d); })
+      .catch(() => {});
+  }, [kalshiRefreshKey]);
 
   // All years in the selected range
   const displayYears = [];
@@ -2919,6 +2933,60 @@ const Dashboard = () => {
                             </Box>
                           </>
                         )}
+
+                        {/* ── Policy Watch callout ── */}
+                        {(() => {
+                          const prob = policyWatchData
+                            ? Math.round((parseFloat(policyWatchData.last_price) || parseFloat(policyWatchData.yes_bid) || 0) * 100)
+                            : null;
+                          const closeYear = policyWatchData?.close_time
+                            ? new Date(policyWatchData.close_time).getFullYear()
+                            : null;
+                          if (prob === null) return null;
+                          const accent = prob >= 60 ? "#f59e0b" : prob >= 40 ? C.muted : C.greenLight;
+                          return (
+                            <Box sx={{ mt: 1.5, p: 1.5, background: accent + "18", borderRadius: 1, borderLeft: `3px solid ${accent}` }}>
+                              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.75 }}>
+                                <Typography sx={{ fontSize: 10, fontWeight: 700, color: accent, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                                  ⚠ Policy Watch · Kalshi
+                                </Typography>
+                                <Typography sx={{ fontSize: 15, fontWeight: 700, color: accent, lineHeight: 1 }}>
+                                  {prob}% likely
+                                </Typography>
+                              </Box>
+                              <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.charcoal, mb: 0.5 }}>
+                                Will legislation restricting institutional single-family home investment become law this year?
+                              </Typography>
+                              <Typography sx={{ fontSize: 11, color: C.charcoal, lineHeight: 1.7 }}>
+                                Kalshi prediction markets price this at <strong>{prob}% probability</strong> — up sharply from ~38% in early
+                                February — making it the single highest-impact legislative risk to near-term home price appreciation.
+                                Institutional landlords such as Blackrock and Invitation Homes collectively hold an estimated 500k–1M+
+                                single-family homes. A forced divestiture would create a significant inventory surge in investor-heavy
+                                markets like Atlanta, Phoenix, Dallas, and Charlotte, putting direct downward pressure on HPA in those
+                                MSAs in the near term.
+                              </Typography>
+                              <Box sx={{ mt: 1, pt: 1, borderTop: `1px solid ${accent}33` }}>
+                                <Typography sx={{ fontSize: 10, fontWeight: 700, color: accent, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.5 }}>
+                                  American Pledge Opportunity
+                                </Typography>
+                                <Typography sx={{ fontSize: 11, color: C.charcoal, lineHeight: 1.7 }}>
+                                  A legislated exit creates a rare structural opportunity for the American Pledge model. Rather than
+                                  flooding the market with distressed inventory, institutional holders could convert their tenant base
+                                  directly into buyers — funding the required <strong>20% down payment</strong> through the AmPledge
+                                  structure as a condition of sale. This approach preserves asset value for the seller, avoids a
+                                  market-wide price shock, and positions AmPledge as the <strong>infrastructure for a national
+                                  housing ownership transition</strong>. The higher the probability climbs, the more urgently
+                                  institutional partners should be engaged before they lose negotiating leverage.
+                                </Typography>
+                              </Box>
+                              {closeYear && (
+                                <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.75, fontStyle: "italic" }}>
+                                  Via Kalshi · KXHFHOUSING-27 · resolves Dec 31, {closeYear}
+                                </Typography>
+                              )}
+                            </Box>
+                          );
+                        })()}
                       </CardContent>
                     </Card>
 
