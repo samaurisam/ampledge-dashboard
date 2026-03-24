@@ -981,14 +981,16 @@ const kalshiValidationNote = (kalshiData, mktTone) => {
 
   const notableStr = notable.slice(0, 3).join(", ");
 
+  const kalshiColor = avg > 0.2 ? C.greenLight : avg < -0.2 ? "#e57373" : C.muted;
+  const em = (text) => <strong style={{ color: kalshiColor }}>{text}</strong>;
   if (aligned) {
-    return `Kalshi prediction markets broadly validate this outlook — consensus prices ${notableStr}, consistent with a ${mktTone} environment.`;
+    return <>{em("Kalshi prediction markets broadly validate this outlook")} — consensus prices {notableStr}, consistent with a {mktTone} environment.</>;
   } else if (kalshiFavorable && !modelFavorable) {
-    return `Kalshi prediction markets offer a more optimistic cross-check than the model signals — consensus prices ${notableStr}, suggesting potential upside relative to the current ${mktTone} assessment.`;
+    return <>{em("Kalshi prediction markets offer a more optimistic cross-check than the model signals")} — consensus prices {notableStr}, suggesting potential upside relative to the current {mktTone} assessment.</>;
   } else if (kalshiChallenging && !modelChallenging) {
-    return `Kalshi prediction markets offer a cautionary cross-check — consensus prices ${notableStr}, suggesting more headwind than the current ${mktTone} assessment implies.`;
+    return <>{em("Kalshi prediction markets offer a cautionary cross-check")} — consensus prices {notableStr}, suggesting more headwind than the current {mktTone} assessment implies.</>;
   } else {
-    return `Kalshi prediction markets offer a mixed cross-check — ${notableStr} — partially supporting and partially challenging the current ${mktTone} outlook.`;
+    return <>{em("Kalshi prediction markets offer a mixed cross-check")} — {notableStr} — partially supporting and partially challenging the current {mktTone} outlook.</>;
   }
 };
 
@@ -1082,6 +1084,7 @@ const Dashboard = () => {
   const [ampledgeEnabled, setAmpledgeEnabled] = useState(false);
   const [kalshiData, setKalshiData] = useState(null);   // { series: {KXFED: {markets:[...]}, ...}, fetched_at }
   const [kalshiError, setKalshiError] = useState(null);
+  const [kalshiLoading, setKalshiLoading] = useState(false);
   const [kalshiRefreshKey, setKalshiRefreshKey] = useState(0);
 
   // Fetch Kalshi prediction market data once when Housing Market tab is first visited
@@ -1090,13 +1093,14 @@ const Dashboard = () => {
     if (chartPane !== "housing") return;
     if (kalshiFetchedRef.current) return;
     kalshiFetchedRef.current = true;
+    setKalshiLoading(true);
     const base = process.env.REACT_APP_KALSHI_API_URL || "https://5g28uduwbk.execute-api.us-east-1.amazonaws.com/markets";
     const seriesList = Object.keys(KALSHI_SERIES_META).join(",");
     const url = `${base}?series=${seriesList}`;
     fetch(url)
       .then((r) => r.json())
-      .then((data) => setKalshiData(data))
-      .catch((err) => { kalshiFetchedRef.current = false; setKalshiError(err.message); });
+      .then((data) => { setKalshiData(data); setKalshiLoading(false); })
+      .catch((err) => { kalshiFetchedRef.current = false; setKalshiError(err.message); setKalshiLoading(false); });
   }, [chartPane, kalshiRefreshKey]);
 
   const refreshKalshi = () => {
@@ -2931,7 +2935,11 @@ const Dashboard = () => {
                                   Updated {new Date(kalshiData.fetched_at).toLocaleTimeString()}
                                 </Typography>
                               )}
-                              <button onClick={refreshKalshi} title="Refresh market data" style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", padding: "2px 7px", fontSize: 13, color: C.muted, lineHeight: 1 }}>⟳</button>
+                              <button onClick={refreshKalshi} disabled={kalshiLoading} title="Refresh market data" style={{ background: kalshiLoading ? "#2aa882" : "#35bd98", border: "none", borderRadius: 4, cursor: kalshiLoading ? "not-allowed" : "pointer", padding: "3px 9px", fontSize: 11, fontWeight: 600, color: "#fff", fontFamily: "'Inter',sans-serif", letterSpacing: "0.03em", display: "flex", alignItems: "center", gap: 4, opacity: kalshiLoading ? 0.8 : 1 }}>
+                                <span style={{ display: "inline-block", animation: kalshiLoading ? "kalshi-spin 0.8s linear infinite" : "none" }}>⟳</span>
+                                {kalshiLoading ? "Loading..." : "Refresh"}
+                                <style>{`@keyframes kalshi-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+                              </button>
                             </Box>
                           </Box>
                           </Box>
