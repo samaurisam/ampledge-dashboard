@@ -24,6 +24,8 @@ import {
   Filler,
 } from "chart.js";
 import { Line, Bar, Scatter, Pie } from "react-chartjs-2";
+import { ComposableMap, Geographies, Geography, ZoomableGroup, Marker } from "react-simple-maps";
+import { C, HOME_VALUE, BM_START, BM, CAP_SCHEDULE, CITY_COLORS, baseFont, baseTooltip, baseGridScale, baseLegend, PROJ_START, PROJ, KALSHI_SERIES_META, GROUND_SCORE_SUPPLEMENTAL, GROUND_SCORE_CS_PROXY, GROUND_SCORE_CS_DIST, NEOPOLI_DIMS, NEOPOLI_TIER_META, NEOPOLI_MARKETS, OPPORTUNITY_DIMS, OPPORTUNITY_SCORES, OPPORTUNITY_SUPPLEMENTAL } from "./data";
 
 const legendBottomPadding = {
   id: "legendBottomPadding",
@@ -50,364 +52,6 @@ ChartJS.register(
   legendBottomPadding,
 );
 
-// ─── Color Palette (Morningstar-inspired) ──────────────────────────────────
-const C = {
-  navy: "#0a2240",
-  navyMid: "#1a3a5c",
-  navyDark: "#061828",
-  red: "#c0392b",
-  redLight: "#e74c3c",
-  green: "#1a7a4a",
-  greenLight: "#27ae60",
-  blue: "#1f6da8",
-  blueLight: "#2980b9",
-  purple: "#6c3483",
-  purpleLight: "#8e44ad",
-  orange: "#d35400",
-  bg: "#f4f6f9",
-  white: "#ffffff",
-  border: "#dde2ea",
-  rowAlt: "#f0f4f8",
-  muted: "#6b7280",
-  charcoal: "#2c3344",
-};
-
-// ─── Static Data ───────────────────────────────────────────────────────────
-// Simulation starts 2016 — matching the "2016-2026 Sim" sheet exactly.
-// Home value is FIXED at $400,000 (purchase price, not revalued annually).
-// Annual return formula: HOME_VALUE Ã— HPA% Ã— Cap + Fees + Bonuses
-// Starting capital compounds: next_start = prev_start + annual_return
-
-const HOME_VALUE = 400000; // Fixed home purchase price throughout simulation
-
-// Benchmark data — 1988–2025 (38 years)
-// Historical (1988-2015): S&P 500 total return, Bloomberg US Agg bond index,
-// NAREIT All REIT index (proxy for VNQ), Freddie Mac 30-yr avg, MBA delinquency rate
-// 2016-2025: sourced from "2016-2026 Sim" tab (exact match)
-const BM_START = 1988;
-const BM = {
-  sp500: [
-    16.6,
-    31.7,
-    -3.1,
-    30.5,
-    7.6,
-    10.1,
-    1.3,
-    37.6,
-    23.0,
-    33.4, // 1988-1997
-    28.6,
-    21.0,
-    -9.1,
-    -11.9,
-    -22.1,
-    28.7,
-    10.9,
-    4.9,
-    15.8,
-    5.5, // 1998-2007
-    -37.0,
-    26.5,
-    15.1,
-    2.1,
-    16.0,
-    32.4,
-    13.7,
-    1.4, // 2008-2015
-    12.0,
-    21.8,
-    -4.4,
-    31.5,
-    18.4,
-    28.7,
-    -18.1,
-    26.3,
-    24.6,
-    15.2, // 2016-2025
-  ],
-  bondIndex: [
-    7.9,
-    14.5,
-    9.0,
-    16.0,
-    7.4,
-    9.8,
-    -2.9,
-    18.5,
-    3.6,
-    9.7, // 1988-1997
-    8.7,
-    -0.8,
-    11.6,
-    8.4,
-    10.3,
-    4.1,
-    4.3,
-    2.4,
-    4.3,
-    7.0, // 1998-2007
-    5.7,
-    5.9,
-    6.5,
-    7.8,
-    4.2,
-    -2.0,
-    6.0,
-    0.5, // 2008-2015
-    2.6,
-    3.5,
-    0.0,
-    8.7,
-    7.5,
-    -1.5,
-    -13.0,
-    5.5,
-    3.0,
-    4.1, // 2016-2025
-  ],
-  vnq: [
-    13.5,
-    8.8,
-    -15.4,
-    35.7,
-    14.6,
-    19.7,
-    3.2,
-    15.3,
-    35.3,
-    20.3, // 1988-1997
-    -17.5,
-    -4.6,
-    26.4,
-    13.9,
-    3.8,
-    37.1,
-    30.7,
-    12.2,
-    35.9,
-    -15.7, // 1998-2007
-    -37.7,
-    28.0,
-    27.9,
-    8.7,
-    19.7,
-    2.9,
-    30.1,
-    2.8, // 2008-2015
-    8.5,
-    5.0,
-    -6.0,
-    28.9,
-    -4.7,
-    46.2,
-    -26.2,
-    16.7,
-    4.0,
-    7.5, // 2016-2025
-  ],
-  // Source: Freddie Mac PMMS — 30-yr fixed rate annual averages
-  mortgageRate: [
-    10.3,
-    10.3,
-    10.1,
-    9.3,
-    8.4,
-    7.3,
-    8.4,
-    8.0,
-    7.8,
-    7.6, // 1988-1997
-    7.0,
-    7.4,
-    8.1,
-    7.0,
-    6.5,
-    5.8,
-    5.8,
-    5.9,
-    6.4,
-    6.4, // 1998-2007
-    6.0,
-    5.1,
-    4.6,
-    4.5,
-    3.7,
-    4.1,
-    4.2,
-    3.9, // 2008-2015
-    3.7,
-    4.0,
-    4.5,
-    4.0,
-    3.1,
-    3.0,
-    5.3,
-    6.8,
-    6.7,
-    6.8, // 2016-2025
-  ],
-  // Source: MBA National Delinquency Survey — total 30+ day past due, all loans, seasonally adjusted
-  delinquencyRate: [
-    4.7,
-    4.9,
-    6.0,
-    7.3,
-    6.3,
-    4.9,
-    3.5,
-    2.9,
-    2.6,
-    2.3, // 1988-1997
-    2.1,
-    1.9,
-    1.9,
-    2.1,
-    2.0,
-    1.8,
-    1.4,
-    1.4,
-    1.5,
-    2.3, // 1998-2007
-    4.7,
-    8.4,
-    9.7,
-    8.8,
-    8.0,
-    6.5,
-    4.8,
-    3.6, // 2008-2015
-    4.7,
-    4.8,
-    4.4,
-    4.2,
-    6.7,
-    5.4,
-    3.8,
-    3.6,
-    4.0,
-    4.1, // 2016-2025
-  ],
-  // Source: Federal Reserve H.15 — 10-year Treasury constant maturity, annual average
-  tenYearYield: [
-    8.85, 8.49, 8.55, 7.86, 7.01, 5.87, 7.09, 6.57, 6.44, 6.35, // 1988-1997
-    5.26, 5.64, 6.03, 5.02, 4.61, 4.01, 4.27, 4.29, 4.79, 4.63, // 1998-2007
-    3.66, 3.26, 3.22, 2.78, 1.80, 2.35, 2.54, 2.14,              // 2008-2015
-    1.84, 2.33, 2.91, 2.14, 0.89, 1.45, 2.95, 3.97, 4.20, 4.28, // 2016-2025
-  ],
-  // Source: BLS CPI-U — annual % change
-  cpi: [
-    4.1, 4.8, 5.4, 4.2, 3.0, 3.0, 2.6, 2.8, 3.0, 2.3, // 1988-1997
-    1.6, 2.2, 3.4, 2.8, 1.6, 2.3, 2.7, 3.4, 3.2, 2.9, // 1998-2007
-    3.8, -0.4, 1.6, 3.2, 2.1, 1.5, 1.6, 0.1,          // 2008-2015
-    1.3, 2.1, 2.4, 1.8, 1.2, 4.7, 8.0, 4.1, 2.9, 2.8, // 2016-2025
-  ],
-  // Source: Census Bureau — single-family housing starts, thousands of units
-  housingStarts: [
-    1081, 1003, 894, 840, 1030, 1126, 1198, 1076, 1161, 1134, // 1988-1997
-    1271, 1302, 1231, 1273, 1359, 1499, 1610, 1716, 1465, 1046, // 1998-2007
-    622, 445, 471, 431, 535, 618, 648, 715,                     // 2008-2015
-    781, 849, 876, 888, 991, 1127, 1005, 947, 1004, 1000,       // 2016-2025
-  ],
-  // Source: NAR — existing homes months of supply, annual average
-  monthsOfSupply: [
-    6.2, 7.5, 8.1, 8.6, 7.6, 6.5, 5.5, 6.2, 5.6, 5.1, // 1988-1997
-    4.8, 4.5, 4.5, 4.9, 4.4, 4.2, 4.3, 4.5, 6.4, 9.6, // 1998-2007
-    10.0, 9.0, 8.7, 8.2, 5.5, 4.9, 5.5, 5.0,           // 2008-2015
-    4.0, 3.8, 3.9, 3.9, 2.5, 2.1, 2.9, 3.2, 3.7, 3.9,  // 2016-2025
-  ],
-  // Source: NAHB — Housing Market Index, annual average (0-100)
-  nahbHMI: [
-    54, 45, 28, 35, 55, 65, 56, 48, 58, 57, // 1988-1997
-    71, 77, 64, 57, 61, 65, 68, 67, 42, 20, // 1998-2007
-    14, 14, 16, 15, 27, 54, 55, 60,         // 2008-2015
-    63, 67, 60, 64, 72, 83, 47, 40, 42, 44, // 2016-2025
-  ],
-  // Source: Census Bureau — median household income, $thousands
-  medianIncome: [
-    27.2, 28.9, 29.9, 30.1, 30.6, 31.2, 32.3, 34.1, 35.5, 37.0, // 1988-1997
-    38.9, 40.7, 42.0, 42.2, 42.4, 43.3, 44.3, 46.3, 48.2, 50.2, // 1998-2007
-    50.3, 49.8, 49.4, 50.1, 51.0, 51.9, 53.7, 56.5,              // 2008-2015
-    59.0, 61.4, 63.2, 68.7, 67.5, 70.8, 74.6, 80.6, 82.0, 84.0, // 2016-2025
-  ],
-  // Source: Census Bureau — rental vacancy rate %
-  rentalVacancy: [
-    7.7, 7.4, 7.2, 7.4, 7.4, 7.3, 7.4, 7.6, 7.9, 7.8, // 1988-1997
-    7.9, 8.1, 8.0, 8.4, 8.9, 9.1, 9.1, 9.0, 8.9, 9.0, // 1998-2007
-    9.6, 10.6, 10.2, 9.5, 8.7, 8.3, 7.6, 7.0,          // 2008-2015
-    6.9, 7.2, 6.8, 6.8, 6.4, 5.8, 5.8, 6.6, 6.9, 7.0,  // 2016-2025
-  ],
-  // Source: NAR / Census — median home price / median household income ratio
-  priceToIncome: [
-    3.1, 3.3, 3.2, 3.1, 2.9, 2.8, 2.7, 2.7, 2.7, 2.7, // 1988-1997
-    2.7, 2.8, 2.9, 3.1, 3.3, 3.5, 3.7, 4.2, 4.4, 4.2, // 1998-2007
-    3.9, 3.5, 3.3, 3.2, 3.3, 3.6, 3.7, 3.9,            // 2008-2015
-    4.1, 4.2, 4.3, 4.4, 4.7, 5.3, 5.4, 5.5, 5.7, 5.8,  // 2016-2025
-  ],
-  // Source: BLS — civilian unemployment rate, annual average %
-  unemploymentRate: [
-    5.5, 5.3, 5.6, 6.8, 7.5, 6.9, 6.1, 5.6, 5.4, 4.9, // 1988-1997
-    4.5, 4.2, 4.0, 4.7, 5.8, 6.0, 5.5, 5.3, 5.1, 4.6, // 1998-2007
-    5.8, 9.3, 9.6, 8.9, 8.1, 7.4, 6.2, 5.3,            // 2008-2015
-    4.9, 4.4, 3.9, 3.7, 8.1, 5.4, 3.6, 3.6, 4.0, 4.2,  // 2016-2025
-  ],
-  // Source: Census — single-family building permits authorized, thousands
-  buildingPermits: [
-    1085, 971, 794, 754, 910, 987, 1069, 997, 1069, 1062, // 1988-1997
-    1187, 1235, 1198, 1237, 1366, 1461, 1613, 1682, 1378,  980, // 1998-2007
-     622,  441,  447,  418,  535,  619,  640,  710,         // 2008-2015
-     778,  848,  862,  862, 1004, 1115,  975,  908,  970,  955, // 2016-2025
-  ],
-  // Source: NAR — existing home sales, millions of units
-  existingHomeSales: [
-    3.51, 3.01, 3.21, 3.22, 3.52, 3.80, 3.95, 3.80, 4.09, 4.21, // 1988-1997
-    4.97, 5.23, 5.17, 5.30, 5.56, 6.18, 6.78, 7.08, 6.48, 5.65, // 1998-2007
-    4.91, 5.16, 4.19, 4.26, 4.66, 5.09, 4.94, 5.25,              // 2008-2015
-    5.45, 5.51, 5.34, 5.34, 5.64, 6.12, 5.03, 4.09, 4.06, 4.20, // 2016-2025
-  ],
-  // Source: Census — net new households formed annually, thousands
-  netHHFormation: [
-    1200, 1100, 1100,  900, 1000, 1100, 1200, 1200, 1200, 1300, // 1988-1997
-    1300, 1400, 1300, 1200, 1100, 1200, 1400, 1300, 1300,  900, // 1998-2007
-     500,  400,  500,  900, 1000, 1100, 1200, 1400,              // 2008-2015
-    1200, 1300, 1300, 1300, 1500, 1800, 1600, 1400, 1300, 1200, // 2016-2025
-  ],
-  // Source: Conference Board — Consumer Confidence Index, 1985=100
-  consumerConfidence: [
-    120, 112,  83,  67,  70,  79,  93, 101, 109, 125, // 1988-1997
-    130, 137, 135, 107,  97,  83,  96, 100, 105, 103, // 1998-2007
-     58,  45,  54,  58,  67,  73,  92,  98,            // 2008-2015
-    100, 119, 130, 128,  92, 113, 104, 108, 105,  95,  // 2016-2025
-  ],
-  // Source: Federal Reserve — effective federal funds rate, annual average %
-  fedFundsRate: [
-    7.57, 9.22, 8.10, 5.69, 3.52, 3.02, 4.21, 5.83, 5.30, 5.46, // 1988-1997
-    5.35, 4.97, 6.24, 3.88, 1.67, 1.13, 1.35, 3.22, 4.97, 5.02, // 1998-2007
-    1.92, 0.24, 0.18, 0.10, 0.14, 0.11, 0.09, 0.13,              // 2008-2015
-    0.39, 1.00, 1.83, 2.16, 0.36, 0.08, 1.68, 5.02, 5.33, 4.50, // 2016-2025
-  ],
-  // Source: MBA — Mortgage Credit Availability Index (null pre-2012; 100=Mar 2012 baseline)
-  mcai: [
-    null, null, null, null, null, null, null, null, null, null, // 1988-1997
-    null, null, null, null, null, null, null, null, null, null, // 1998-2007
-    null, null, null, null, 100, 108, 115, 116,                 // 2008-2015 (2012 onward)
-     120,  178,  183,  189,  162,  134,  115,  97,  95,  93,   // 2016-2025
-  ],
-  // Source: MBA — % of mortgages in foreclosure inventory, annual average
-  foreclosureRate: [
-    0.9, 1.0, 1.2, 1.3, 1.3, 1.2, 1.0, 0.9, 0.9, 1.0, // 1988-1997
-    1.1, 1.2, 1.2, 1.3, 1.5, 1.6, 1.3, 1.0, 1.1, 1.8, // 1998-2007
-    3.3, 4.6, 4.6, 4.4, 3.7, 2.9, 2.3, 1.8,            // 2008-2015
-    1.4, 1.2, 1.1, 1.0, 0.7, 0.4, 0.5, 0.6, 0.7, 0.8, // 2016-2025
-  ],
-  // Source: Census — homeownership rate, % of households that own
-  homeownershipRate: [
-    63.8, 63.9, 63.9, 64.0, 64.2, 64.0, 64.0, 64.7, 65.4, 65.7, // 1988-1997
-    66.3, 66.8, 67.4, 67.8, 67.9, 68.3, 69.0, 68.9, 68.8, 68.1, // 1998-2007
-    67.8, 67.4, 66.9, 66.1, 65.5, 65.1, 64.5, 63.7,              // 2008-2015
-    63.4, 63.9, 64.4, 64.6, 65.8, 65.5, 65.8, 65.7, 65.6, 65.5, // 2016-2025
-  ],
-};
 const getBM = (field, yr) => {
   const i = yr - BM_START;
   return BM[field]?.[i] ?? null;
@@ -445,33 +89,6 @@ const CS_ANNUAL_USA = Object.fromEntries(
 // });
 const getHPA = (yr) => CS_ANNUAL_USA[yr] ?? null;
 
-const CITY_COLORS = {
-  USA: C.red,
-  Atlanta: "#e74c3c",
-  Boston: "#9b59b6",
-  Charlotte: "#2ecc71",
-  Chicago: "#3498db",
-  Cleveland: "#1abc9c",
-  Dallas: "#f39c12",
-  Denver: "#d35400",
-  Detroit: "#c0392b",
-  "Las Vegas": "#8e44ad",
-  "Los Angeles": "#2980b9",
-  Miami: "#16a085",
-  Minneapolis: "#27ae60",
-  "New York": "#2c3e50",
-  Phoenix: "#e67e22",
-  Portland: "#7f8c8d",
-  "San Diego": "#6c5ce7",
-  "San Francisco": "#00b894",
-  Seattle: "#0984e3",
-  Tampa: "#fd79a8",
-  "Washington DC": "#636e72",
-};
-
-const CAP_SCHEDULE = [
-  0.4667, 0.5716, 0.6921, 0.8329, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-];
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 const avg = (arr) =>
@@ -625,27 +242,6 @@ const BulletRow = ({ label, value, benchmarks, max }) => {
   );
 };
 
-// ─── Chart shared option factories ────────────────────────────────────────
-const baseFont = { family: "'Inter','Helvetica Neue',sans-serif" };
-const baseTooltip = {
-  backgroundColor: C.navyDark,
-  padding: 10,
-  cornerRadius: 4,
-  titleFont: { ...baseFont, size: 12 },
-  bodyFont: { ...baseFont, size: 11 },
-};
-const baseGridScale = {
-  grid: { color: "#e8ecf1", lineWidth: 0.8 },
-  ticks: { font: { ...baseFont, size: 10 }, color: C.muted },
-};
-const baseLegend = {
-  labels: {
-    font: (ctx) => ({ ...baseFont, size: ctx.chart.width < 450 ? 9 : 11 }),
-    color: C.charcoal,
-    boxWidth: 10,
-    padding: 8,
-  },
-};
 
 // ─── Housing Driver Correlations (2016–2025) ────────────────────────────────
 const generateInterp = (label, r, vals, hpaVals) => {
@@ -791,88 +387,6 @@ const generateInterp = (label, r, vals, hpaVals) => {
   }
 };
 
-// ─── 5-Year Scenario Projections (2026–2030) ────────────────────────────────
-const PROJ_START = 2026;
-const PROJ = {
-  bear: {
-    // 2026–2035 (indices 0–9)
-    hpa:              [0.8,  0.8,  1.0,  1.5,  1.5,  1.5,  1.8,  2.0,  2.0,  2.2],
-    sp500:            [3.0,  0.5,  6.0,  2.5,  7.0,  2.0,  7.5,  4.5,  6.5,  6.0],
-    bondIndex:        [5.0,  1.5,  4.0,  2.5,  4.5,  2.0,  4.0,  3.5,  4.0,  4.0],
-    vnq:              [-3.0, 1.0,  4.0,  5.0,  3.0,  7.5,  2.5,  8.0,  5.5,  4.5],
-    mortgageRate:     [6.0,  6.0,  5.75, 5.5,  5.5,  5.5,  5.25, 5.25, 5.0,  5.0],
-    delinquencyRate:  [4.3,  4.6,  4.8,  4.7,  4.5,  4.3,  4.1,  4.0,  3.9,  3.8],
-    tenYearYield:     [4.5,  4.6,  4.4,  4.3,  4.2,  4.1,  4.0,  3.9,  3.8,  3.8],
-    cpi:              [3.2,  3.0,  2.8,  2.7,  2.6,  2.5,  2.4,  2.3,  2.3,  2.2],
-    housingStarts:    [940,  910,  900,  910,  930,  950,  960,  970,  975,  980],
-    monthsOfSupply:   [3.9,  4.3,  4.6,  4.7,  4.6,  4.5,  4.4,  4.3,  4.2,  4.1],
-    nahbHMI:          [38,   34,   36,   39,   42,   43,   45,   47,   48,   50],
-    medianIncome:     [85.0, 86.0, 87.5, 89.0, 90.5, 92.0, 93.5, 95.0, 96.5, 98.0],
-    rentalVacancy:    [7.2,  7.6,  7.9,  8.1,  8.2,  8.3,  8.3,  8.2,  8.1,  8.0],
-    priceToIncome:    [5.8,  5.7,  5.7,  5.7,  5.7,  5.7,  5.7,  5.7,  5.7,  5.8],
-    unemploymentRate: [4.5,  5.1,  5.4,  5.3,  5.1,  5.0,  4.8,  4.6,  4.5,  4.4],
-    buildingPermits:  [920,  885,  865,  880,  900,  915,  930,  945,  955,  965],
-    existingHomeSales:[3.8,  3.6,  3.7,  3.9,  4.0,  4.1,  4.2,  4.3,  4.4,  4.5],
-    netHHFormation:   [1100, 980,  990,  1030, 1080, 1100, 1120, 1130, 1140, 1150],
-    consumerConfidence:[83,  75,   76,   81,   85,   87,   89,   91,   93,   95],
-    fedFundsRate:     [4.0,  4.0,  3.75, 3.5,  3.5,  3.5,  3.25, 3.25, 3.0,  3.0],
-    mcai:             [90,   86,   83,   84,   87,   88,   90,   91,   92,   93],
-    foreclosureRate:  [1.0,  1.3,  1.4,  1.4,  1.3,  1.2,  1.1,  1.0,  0.9,  0.9],
-    homeownershipRate:[65.3, 65.0, 64.8, 64.7, 64.6, 64.6, 64.6, 64.7, 64.8, 64.9],
-  },
-  base: {
-    // 2026–2035 (indices 0–9)
-    hpa:              [3.0,  3.5,  4.0,  4.0,  3.5,  3.5,  3.5,  3.5,  3.5,  3.5],
-    sp500:            [8.0,  3.5,  11.0, -1.5, 7.0,  4.5,  8.5,  2.0,  6.5,  5.5],
-    bondIndex:        [5.5,  2.5,  4.5,  3.0,  5.0,  2.0,  5.0,  4.0,  4.5,  4.5],
-    vnq:              [9.0,  4.0,  12.5, 1.5,  9.5,  4.5,  10.0, 3.5,  8.0,  6.5],
-    mortgageRate:     [5.5,  5.0,  4.8,  4.5,  4.5,  4.5,  4.5,  4.5,  4.5,  4.5],
-    delinquencyRate:  [4.2,  4.0,  3.9,  3.8,  3.7,  3.6,  3.5,  3.5,  3.4,  3.4],
-    tenYearYield:     [4.1,  3.9,  3.75, 3.65, 3.6,  3.55, 3.5,  3.45, 3.4,  3.4],
-    cpi:              [2.5,  2.3,  2.2,  2.1,  2.1,  2.1,  2.0,  2.0,  2.0,  2.0],
-    housingStarts:    [1020, 1060, 1090, 1110, 1130, 1150, 1165, 1180, 1190, 1200],
-    monthsOfSupply:   [3.7,  3.5,  3.4,  3.3,  3.2,  3.1,  3.0,  3.0,  2.9,  2.9],
-    nahbHMI:          [46,   50,   53,   55,   55,   56,   57,   58,   59,   60],
-    medianIncome:     [86.5, 89.0, 91.5, 94.0, 96.5, 99.0, 101.5,104.0,106.5,109.0],
-    rentalVacancy:    [6.9,  6.8,  6.7,  6.6,  6.5,  6.4,  6.4,  6.3,  6.3,  6.2],
-    priceToIncome:    [5.8,  5.8,  5.9,  6.0,  6.0,  6.1,  6.1,  6.2,  6.3,  6.3],
-    unemploymentRate: [4.3,  4.2,  4.0,  3.9,  3.9,  3.8,  3.8,  3.8,  3.8,  3.8],
-    buildingPermits:  [980,  1020, 1055, 1080, 1110, 1130, 1150, 1165, 1180, 1190],
-    existingHomeSales:[4.3,  4.6,  4.8,  5.0,  5.1,  5.2,  5.3,  5.4,  5.5,  5.5],
-    netHHFormation:   [1250, 1280, 1300, 1290, 1270, 1260, 1250, 1240, 1240, 1230],
-    consumerConfidence:[100, 104,  107,  109,  111,  112,  114,  115,  116,  117],
-    fedFundsRate:     [3.75, 3.25, 3.0,  2.75, 2.75, 2.75, 2.75, 2.75, 2.75, 2.75],
-    mcai:             [95,   99,   103,  106,  108,  110,  112,  113,  115,  116],
-    foreclosureRate:  [0.9,  0.8,  0.8,  0.7,  0.7,  0.7,  0.6,  0.6,  0.6,  0.6],
-    homeownershipRate:[65.5, 65.6, 65.7, 65.8, 66.0, 66.1, 66.2, 66.3, 66.4, 66.5],
-  },
-  bull: {
-    // 2026–2035 (indices 0–9)
-    hpa:              [5.0,  6.0,  6.5,  6.0,  5.5,  5.0,  4.5,  4.0,  3.8,  3.5],
-    sp500:            [10.0, 5.5,  12.0, 3.0,  9.5,  5.0,  11.5, 3.5,  8.5,  0.0],
-    bondIndex:        [6.0,  2.5,  5.5,  2.5,  5.0,  2.5,  5.0,  3.0,  4.5,  4.0],
-    vnq:              [18.0, 8.5,  19.0, 4.0,  14.0, 5.0,  16.0, 2.5,  8.0,  0.0],
-    mortgageRate:     [4.8,  4.3,  4.0,  4.0,  4.0,  4.0,  4.0,  4.0,  3.8,  3.8],
-    delinquencyRate:  [4.0,  3.7,  3.5,  3.4,  3.3,  3.2,  3.1,  3.0,  3.0,  2.9],
-    tenYearYield:     [3.9,  3.6,  3.4,  3.3,  3.2,  3.1,  3.0,  2.9,  2.9,  2.8],
-    cpi:              [2.3,  2.1,  2.0,  2.0,  2.0,  2.0,  2.0,  2.0,  2.0,  2.0],
-    housingStarts:    [1080, 1140, 1190, 1230, 1260, 1280, 1300, 1315, 1325, 1330],
-    monthsOfSupply:   [3.4,  3.1,  2.9,  2.8,  2.7,  2.6,  2.5,  2.5,  2.4,  2.4],
-    nahbHMI:          [52,   59,   64,   64,   63,   62,   61,   60,   59,   59],
-    medianIncome:     [87.5, 91.0, 94.5, 98.0, 101.5,105.0,108.5,112.0,115.5,119.0],
-    rentalVacancy:    [6.6,  6.3,  6.1,  5.9,  5.8,  5.7,  5.6,  5.5,  5.5,  5.4],
-    priceToIncome:    [5.8,  6.0,  6.1,  6.2,  6.4,  6.5,  6.5,  6.6,  6.6,  6.7],
-    unemploymentRate: [4.0,  3.7,  3.5,  3.5,  3.6,  3.6,  3.5,  3.5,  3.5,  3.5],
-    buildingPermits:  [1050, 1110, 1170, 1220, 1250, 1275, 1295, 1310, 1325, 1335],
-    existingHomeSales:[4.7,  5.2,  5.5,  5.7,  5.8,  5.9,  6.0,  6.1,  6.1,  6.2],
-    netHHFormation:   [1350, 1430, 1490, 1470, 1440, 1410, 1380, 1360, 1340, 1320],
-    consumerConfidence:[111, 119,  125,  128,  129,  131,  132,  133,  133,  134],
-    fedFundsRate:     [3.25, 2.75, 2.5,  2.5,  2.5,  2.5,  2.5,  2.5,  2.25, 2.25],
-    mcai:             [100,  109,  117,  122,  125,  127,  129,  131,  132,  133],
-    foreclosureRate:  [0.7,  0.6,  0.55, 0.55, 0.5,  0.5,  0.5,  0.45, 0.45, 0.45],
-    homeownershipRate:[65.8, 66.2, 66.5, 66.8, 67.1, 67.3, 67.5, 67.6, 67.7, 67.8],
-  },
-};
 const getProj = (field, yr, scenario) => {
   if (yr < PROJ_START) return getBM(field, yr);
   const arr = PROJ[scenario]?.[field];
@@ -1062,24 +576,16 @@ const kalshiSummary = (tiles) => {
   return sentences.length > 0 ? sentences.join(" ") : null;
 };
 
-// Map Kalshi series → dashboard metric label
-const KALSHI_SERIES_META = {
-  KXUSHOMEVAL:    { label: "US Home Value (ZHVI)",  unit: "$k", decimals: 0, housingSignal: (v) => v > 362000 ? 1 : v > 355000 ? 0 : -1 },
-  KXMORTGAGERATE: { label: "30-yr Mortgage Rate",  unit: "%",  decimals: 2, housingSignal: (v) => v < 6.5   ? 1 : v < 7.0    ? 0 : -1 },
-  KXFED:          { label: "Fed Funds Rate",        unit: "%",  decimals: 2, housingSignal: (v) => v < 4.0   ? 1 : v < 4.75   ? 0 : -1 },
-  KXCPIYOY:       { label: "CPI (YoY)",             unit: "%",  decimals: 1, housingSignal: (v) => v < 2.8   ? 1 : v < 3.3    ? 0 : -1 },
-  KXCPI:          { label: "CPI (MoM)",             unit: "%",  decimals: 2, housingSignal: (v) => v < 0.2   ? 1 : v < 0.4    ? 0 : -1 },
-  KXU3:           { label: "Unemployment Rate",     unit: "%",  decimals: 1, housingSignal: (v) => v < 4.0   ? 1 : v < 5.0    ? 0 : -1 },
-  KXEHSALES:      { label: "Existing Home Sales",   unit: "M",  decimals: 2, housingSignal: (v) => v > 4.3   ? 1 : v > 3.9    ? 0 : -1 },
-  KXHOUSINGSTART: { label: "Housing Starts",        unit: "M",  decimals: 3, housingSignal: (v) => v > 1.4   ? 1 : v > 1.2    ? 0 : -1 },
-  KXNHSALES:      { label: "New Home Sales",        unit: "k",  decimals: 0, housingSignal: (v) => v > 700   ? 1 : v > 600    ? 0 : -1 },
-};
 
 const Dashboard = () => {
   const [yearRange, setYearRange] = useState([2016, 2025]);
   const [selectedCity, setSelectedCity] = useState(null); // null = USA highlighted only
   const [tableView, setTableView] = useState("detail"); // 'detail' | 'benchmark' | 'housing'
-  const [chartPane, setChartPane] = useState("portfolio"); // 'portfolio' | 'housing'
+  const [chartPane, setChartPane] = useState("portfolio"); // 'portfolio' | 'housing' | 'neopoli'
+  const [neopoliMarket, setNeopoliMarket] = useState("brownsville_tx");
+  const [showDimDesc, setShowDimDesc] = useState(false);
+  const [mapZoom, setMapZoom] = useState(1);
+  const [mapCenter, setMapCenter] = useState([-96, 38]);
   const [scenario, setScenario] = useState("base"); // 'bear' | 'base' | 'bull'
   const [ampledgeEnabled, setAmpledgeEnabled] = useState(false);
   const [kalshiData, setKalshiData] = useState(null);   // { series: {KXFED: {markets:[...]}, ...}, fetched_at }
@@ -2068,18 +1574,24 @@ const Dashboard = () => {
                           Monthly YoY % change · 20 MSAs + National Composite ·
                           Source: FRED
                           {selectedCity && (
-                            <span
-                              style={{
-                                color: C.red,
-                                fontWeight: 700,
-                                marginLeft: 8,
-                              }}
-                            >
+                            <span style={{ color: C.red, fontWeight: 700, marginLeft: 8 }}>
                               ▶ {selectedCity} highlighted
                             </span>
                           )}
                         </Typography>
                       </Box>
+                      {(chartPane === "neopoli" || chartPane === "opportunity") && (() => {
+                        const mkt = NEOPOLI_MARKETS.find(x => x.id === neopoliMarket);
+                        const proxy = mkt && GROUND_SCORE_CS_PROXY[mkt.id];
+                        const dist  = mkt && GROUND_SCORE_CS_DIST[mkt.id];
+                        if (!proxy || !dist) return null;
+                        return (
+                          <Box sx={{ textAlign: "right" }}>
+                            <Typography sx={{ fontSize: 22, fontWeight: 800, color: CITY_COLORS[proxy] || C.navy, lineHeight: 1.1 }}>{dist} mi</Typography>
+                            <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.25 }}>from {mkt.name} to {proxy}</Typography>
+                          </Box>
+                        );
+                      })()}
                     </Box>
 
                     {/* Zero line reference + chart */}
@@ -2242,6 +1754,133 @@ const Dashboard = () => {
                     </Box>
                   </CardContent>
                 </Card>
+
+                {/* Ground Score Market Rankings — shown below Case-Shiller when Urban Signal Indexing tab is active */}
+                {chartPane === "neopoli" && (
+                  <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                    <CardContent sx={{ pb: "12px !important" }}>
+                      <SectionHeader title="Ground Score Rankings" sub="Composite scored candidates · deterministic screening run · 2026-03-27 · click a market to load its scorecard" />
+
+                      {/* Concept explanation */}
+                      <Box sx={{ mb: 2, pb: 2, borderBottom: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 1 }}>
+                        <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.65 }}>
+                          <span style={{ fontWeight: 700, color: C.charcoal }}>What Ground Score Is — </span>
+                          Ground Score is a location-intelligence scoring platform built to identify where capital, infrastructure investment, and public-sector alignment are most likely to produce successful long-term urban growth. It answers a single high-value strategic question: <span style={{ fontStyle: "italic", color: C.charcoal }}>where should a new city or major district actually be built?</span>
+                        </Typography>
+                        <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.65 }}>
+                          <span style={{ fontWeight: 700, color: C.charcoal }}>Where the Data Comes From — </span>
+                          Scores are built from U.S. Census Bureau QuickFacts, Bureau of Labor Statistics employment data, DOE project records, and other official public sources. Each market is evaluated on 12 fixed dimensions covering cost, distress, demographic and labor momentum, business activity, catalysts, anchor institutions, infrastructure, logistics, governance, risk, and regulatory friction.
+                        </Typography>
+                        <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.65 }}>
+                          <span style={{ fontWeight: 700, color: C.charcoal }}>The Logic & Why It Matters — </span>
+                          The goal is not to find the cheapest place — it is to find where <span style={{ fontStyle: "italic", color: C.charcoal }}>low cost, distress, momentum, and executability align</span>. Some poor places begin to grow while others stay stagnant; the rubric is designed to separate the two. A higher composite score means more convergence of those conditions. Green tiers represent viable candidates worth advancing; gray indicates insufficient evidence for near-term prioritization.
+                        </Typography>
+                      </Box>
+
+                      <Box sx={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                          <thead>
+                            <tr>
+                              {["#", "Market", "State · County", "Ground Score", "Confidence", "Portfolio Tier"].map(h => (
+                                <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {NEOPOLI_MARKETS.map((m, i) => {
+                              const tierMeta = NEOPOLI_TIER_META[m.tier] || NEOPOLI_TIER_META.watchlist;
+                              const isSelected = neopoliMarket === m.id;
+                              const csProxy = GROUND_SCORE_CS_PROXY[m.id];
+                              const csDist  = GROUND_SCORE_CS_DIST[m.id];
+                              return (
+                                <tr key={m.id} onClick={() => {
+                                  setNeopoliMarket(m.id);
+                                  if (csProxy) setSelectedCity(csProxy);
+                                }} style={{ background: isSelected ? "#e8f0fa" : i % 2 === 0 ? "transparent" : C.bg, cursor: "pointer", borderBottom: `1px solid ${C.border}` }}>
+                                  <td style={{ padding: "7px 10px", fontWeight: 700, color: C.navy, fontSize: 11, minWidth: 24, borderLeft: isSelected ? `3px solid ${C.navy}` : "3px solid transparent" }}>{m.rank}</td>
+                                  <td style={{ padding: "7px 10px", fontWeight: isSelected ? 700 : 600, color: isSelected ? C.navy : C.charcoal, whiteSpace: "nowrap" }}>
+                                    {m.name}
+                                    {csProxy && <span style={{ fontSize: 9, color: C.muted, marginLeft: 5 }}>≈ {csProxy}{csDist ? ` · ${csDist} mi` : ""}</span>}
+                                  </td>
+                                  <td style={{ padding: "7px 10px", color: C.muted, whiteSpace: "nowrap", fontSize: 11 }}>{m.state} · {m.county}</td>
+                                  <td style={{ padding: "7px 14px 7px 10px", whiteSpace: "nowrap", minWidth: 160 }}>
+                                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                      <Box sx={{ flex: 1, height: 6, background: C.border, borderRadius: 3, minWidth: 80 }}>
+                                        <Box sx={{ width: `${m.composite}%`, height: "100%", background: tierMeta.barColor, borderRadius: 3 }} />
+                                      </Box>
+                                      <span style={{ fontWeight: 700, color: C.charcoal, fontSize: 11, minWidth: 36, textAlign: "right" }}>{m.composite.toFixed(1)}</span>
+                                    </Box>
+                                  </td>
+                                  <td style={{ padding: "7px 10px", color: C.muted, fontSize: 11, fontVariantNumeric: "tabular-nums", textAlign: "right" }}>{m.confidence.toFixed(1)}</td>
+                                  <td style={{ padding: "7px 10px" }}>
+                                    <span style={{ fontSize: 10, fontWeight: 700, color: tierMeta.color, background: tierMeta.badgeBg || tierMeta.color + "18", border: `1px solid ${tierMeta.badgeBg ? tierMeta.color + "88" : tierMeta.color + "44"}`, borderRadius: 4, padding: "2px 7px", whiteSpace: "nowrap" }}>{tierMeta.label}</span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </Box>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* Opportunity Rankings — shown below Case-Shiller when Opportunity Urban Signals tab is active */}
+                {chartPane === "opportunity" && (
+                  <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                    <CardContent sx={{ pb: "12px !important" }}>
+                      <SectionHeader title="Opportunity Score Rankings" sub="MPD site-selection scoring · same 15 markets evaluated on greenfield development criteria · click a market to load its scorecard" />
+                      <Box sx={{ mb: 2, pb: 2, borderBottom: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 1 }}>
+                        <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.65 }}>
+                          <span style={{ fontWeight: 700, color: C.charcoal }}>Purpose of This View — </span>
+                          The same 15 markets are scored here against master-planned community development criteria: metro adjacency, household income, school quality, permitting climate, and confirmed population demand. These markets are Contrarian candidates — expect low scores. This view validates the thesis separation and serves as a baseline until dedicated Opportunity candidates are added.
+                        </Typography>
+                      </Box>
+                      <Box sx={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                          <thead>
+                            <tr>
+                              {["#", "Market", "State · County", "Opportunity Score", "Confidence", "Dev. Tier"].map(h => (
+                                <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[...NEOPOLI_MARKETS].sort((a, b) => (OPPORTUNITY_SCORES[b.id]?.composite || 0) - (OPPORTUNITY_SCORES[a.id]?.composite || 0)).map((m, i) => {
+                              const opp = OPPORTUNITY_SCORES[m.id] || { composite: 0, confidence: 0, tier: "deprioritized" };
+                              const tierMeta = NEOPOLI_TIER_META[opp.tier] || NEOPOLI_TIER_META.deprioritized;
+                              const isSelected = neopoliMarket === m.id;
+                              const csProxy = GROUND_SCORE_CS_PROXY[m.id];
+                              const csDist  = GROUND_SCORE_CS_DIST[m.id];
+                              return (
+                                <tr key={m.id} onClick={() => { setNeopoliMarket(m.id); if (csProxy) setSelectedCity(csProxy); }} style={{ background: isSelected ? "#e8f0fa" : i % 2 === 0 ? "transparent" : C.bg, cursor: "pointer", borderBottom: `1px solid ${C.border}` }}>
+                                  <td style={{ padding: "7px 10px", fontWeight: 700, color: C.navy, fontSize: 11, minWidth: 24, borderLeft: isSelected ? `3px solid ${C.navy}` : "3px solid transparent" }}>{i + 1}</td>
+                                  <td style={{ padding: "7px 10px", fontWeight: isSelected ? 700 : 600, color: isSelected ? C.navy : C.charcoal, whiteSpace: "nowrap" }}>
+                                    {m.name}
+                                    {csProxy && <span style={{ fontSize: 9, color: C.muted, marginLeft: 5 }}>≈ {csProxy}{csDist ? ` · ${csDist} mi` : ""}</span>}
+                                  </td>
+                                  <td style={{ padding: "7px 10px", color: C.muted, whiteSpace: "nowrap", fontSize: 11 }}>{m.state} · {m.county}</td>
+                                  <td style={{ padding: "7px 14px 7px 10px", whiteSpace: "nowrap", minWidth: 160 }}>
+                                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                      <Box sx={{ flex: 1, height: 6, background: C.border, borderRadius: 3, minWidth: 80 }}>
+                                        <Box sx={{ width: `${opp.composite}%`, height: "100%", background: tierMeta.barColor, borderRadius: 3 }} />
+                                      </Box>
+                                      <span style={{ fontWeight: 700, color: C.charcoal, fontSize: 11, minWidth: 36, textAlign: "right" }}>{opp.composite.toFixed(1)}</span>
+                                    </Box>
+                                  </td>
+                                  <td style={{ padding: "7px 10px", color: C.muted, fontSize: 11, fontVariantNumeric: "tabular-nums", textAlign: "right" }}>{opp.confidence.toFixed(1)}</td>
+                                  <td style={{ padding: "7px 10px" }}>
+                                    <span style={{ fontSize: 10, fontWeight: 700, color: tierMeta.color, background: tierMeta.badgeBg || tierMeta.color + "18", border: `1px solid ${tierMeta.badgeBg ? tierMeta.color + "88" : tierMeta.color + "44"}`, borderRadius: 4, padding: "2px 7px", whiteSpace: "nowrap" }}>{tierMeta.label}</span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </Box>
+                    </CardContent>
+                  </Card>
+                )}
 
                 {/* Housing driver charts — shown below Case-Shiller when Housing Market tab is active */}
                 {chartPane === "housing" && (() => {
@@ -2438,13 +2077,22 @@ const Dashboard = () => {
                 >
                   {/* Pane toggle */}
                   <Box sx={{ display: "flex", borderRadius: 1, overflow: "hidden", border: `1px solid ${C.border}`, alignSelf: "flex-start" }}>
-                    {[["portfolio", "Portfolio"], ["housing", "Housing Market"]].map(([v, label]) => (
-                      <button key={v} onClick={() => setChartPane(v)} style={{
+                    {[["portfolio", "Portfolio"], ["housing", "Housing Market"], ["neopoli", "Contrarian Urban Signals"], ["opportunity", "Opportunity Urban Signals"]].map(([v, label]) => (
+                      <button key={v} onClick={() => {
+                        setChartPane(v);
+                        if (v === "neopoli" || v === "opportunity") {
+                          const proxy = GROUND_SCORE_CS_PROXY[neopoliMarket];
+                          setSelectedCity(proxy || null);
+                        } else {
+                          setSelectedCity(null);
+                        }
+                      }} style={{
                         padding: "5px 12px", fontSize: 11, fontWeight: 600,
                         fontFamily: "'Inter',sans-serif", border: "none", cursor: "pointer",
                         background: chartPane === v ? C.navy : C.white,
                         color: chartPane === v ? C.white : C.muted,
                         transition: "all 0.15s",
+                        borderLeft: v === "portfolio" ? "none" : `1px solid ${C.border}`,
                       }}>{label}</button>
                     ))}
                   </Box>
@@ -3156,6 +2804,458 @@ const Dashboard = () => {
                         </Box>
                       </CardContent>
                     </Card>
+                  </Box>}
+
+                  {/* ── Ground Score Data ── */}
+                  {chartPane === "neopoli" && <Box sx={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+
+                    {/* US Map — hidden until dataset is larger; infrastructure preserved (react-simple-maps import, mapZoom/mapCenter state, market coordinates) */}
+
+                    {/* Market Summary */}
+                    {(() => {
+                      const m = NEOPOLI_MARKETS.find(x => x.id === neopoliMarket) || NEOPOLI_MARKETS[0];
+                      const tierMeta = NEOPOLI_TIER_META[m.tier] || NEOPOLI_TIER_META.watchlist;
+                      // Metric-driven insight generation
+                      const dimScores = NEOPOLI_DIMS.map(d => ({ label: d.label, score: m.dims[d.id] ?? 0, weight: d.weight }));
+                      const sorted = [...dimScores].sort((a, b) => b.score - a.score);
+                      const top3 = sorted.slice(0, 3);
+                      const bot3 = sorted.slice(-3).reverse();
+                      const strongCount = dimScores.filter(d => d.score >= 70).length;
+                      const weakCount   = dimScores.filter(d => d.score < 40).length;
+                      const topStr = top3.map(d => `${d.label} (${d.score.toFixed(0)})`).join(", ");
+                      const botStr = bot3.filter(d => d.score < 55).map(d => `${d.label} (${d.score.toFixed(0)})`).join(", ");
+                      return (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", mb: 1.25, flexWrap: "wrap", gap: 1 }}>
+                              <Box sx={{ mb: 2, pb: 1, borderBottom: `2px solid ${C.navy}` }}>
+                                <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.09em" }}>{m.name}, {m.state} · Market Summary</Typography>
+                                <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.25 }}>
+                                  {m.county} · rank #{m.rank} of 15 · composite {m.composite.toFixed(1)} · confidence {m.confidence.toFixed(0)}%
+                                </Typography>
+                              </Box>
+                              <span style={{ fontSize: 10, fontWeight: 700, color: tierMeta.color, background: tierMeta.badgeBg || tierMeta.color + "18", border: `1px solid ${tierMeta.badgeBg ? tierMeta.color + "88" : tierMeta.color + "44"}`, borderRadius: 4, padding: "3px 10px", whiteSpace: "nowrap", alignSelf: "flex-start" }}>{tierMeta.label}</span>
+                            </Box>
+                            <Typography sx={{ fontSize: 12, color: C.charcoal, lineHeight: 1.7, mb: 1.5 }}>{m.rationale}</Typography>
+                            <Box sx={{ pt: 1.25, borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 0.75 }}>
+                              <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.65 }}>
+                                <span style={{ fontWeight: 700, color: C.charcoal }}>Score Drivers — </span>
+                                {strongCount} of 12 dimensions score above 70. Leading signals are <span style={{ fontWeight: 600, color: C.charcoal }}>{topStr}</span> — reflecting the market's strongest structural advantages. {weakCount > 0 ? <>Primary drag comes from <span style={{ fontWeight: 600, color: C.charcoal }}>{botStr}</span>, {weakCount > 1 ? "the lowest-scoring dimensions" : "the lowest-scoring dimension"} in this market's profile and the primary areas of caution for near-term development planning.</> : <>No dimension scores below 40, indicating a broadly capable market profile with no single structural failure point.</>}
+                              </Typography>
+                            </Box>
+                            <Box sx={{ pt: 1.25, mt: 0.5, borderTop: `1px solid ${C.border}`, display: "flex", gap: 2, flexWrap: "wrap" }}>
+                              <Box sx={{ flex: 1, minWidth: 160 }}>
+                                <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.green, textTransform: "uppercase", letterSpacing: "0.05em", mb: 0.5 }}>Tailwinds</Typography>
+                                {m.strengths.map((s, idx) => <Typography key={idx} sx={{ fontSize: 10, color: C.charcoal, lineHeight: 1.5 }}>· {s}</Typography>)}
+                              </Box>
+                              <Box sx={{ flex: 1, minWidth: 160 }}>
+                                <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.red, textTransform: "uppercase", letterSpacing: "0.05em", mb: 0.5 }}>Headwinds</Typography>
+                                {m.constraints.map((cn, idx) => <Typography key={idx} sx={{ fontSize: 10, color: C.charcoal, lineHeight: 1.5 }}>· {cn}</Typography>)}
+                              </Box>
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      );
+                    })()}
+
+                    {/* Dimension Scorecard */}
+                    {(() => {
+                      const m = NEOPOLI_MARKETS.find(x => x.id === neopoliMarket) || NEOPOLI_MARKETS[0];
+                      return (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent>
+                            <Box sx={{ mb: 1.5, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 1 }}>
+                              <SectionHeader title="Dimension Scorecard" sub="12 weighted dimensions · scores 0–100" />
+                              <button onClick={() => setShowDimDesc(v => !v)} style={{ fontSize: 10, fontWeight: 600, fontFamily: "'Inter',sans-serif", padding: "3px 10px", border: `1px solid ${C.border}`, borderRadius: 4, background: showDimDesc ? C.navy : "transparent", color: showDimDesc ? C.white : C.muted, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>
+                                {showDimDesc ? "Hide descriptions" : "Show descriptions"}
+                              </button>
+                            </Box>
+                            <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+                              {NEOPOLI_DIMS.map(dim => {
+                                const score = m.dims[dim.id] ?? 0;
+                                const barColor = score >= 75 ? C.greenLight : score >= 50 ? C.blue : score >= 25 ? C.orange : C.red;
+                                return (
+                                  <Box key={dim.id} sx={{ flex: "1 1 200px", minWidth: 0 }}>
+                                    <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                                      <span style={{ fontSize: 10, fontWeight: 600, color: C.charcoal }}>{dim.label}</span>
+                                      <span style={{ fontSize: 10, fontWeight: 700, color: barColor }}>{score.toFixed(0)}</span>
+                                    </Box>
+                                    <Box sx={{ height: 5, background: C.border, borderRadius: 3 }}>
+                                      <Box sx={{ width: `${score}%`, height: "100%", background: barColor, borderRadius: 3 }} />
+                                    </Box>
+                                    <span style={{ fontSize: 9, color: C.muted, display: "block", marginTop: 3 }}>
+                                      <span style={{ fontWeight: 700 }}>wt {dim.weight}</span>
+                                      {showDimDesc && <> · {dim.desc}</>}
+                                    </span>
+                                  </Box>
+                                );
+                              })}
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      );
+                    })()}
+
+                    {/* ── Supplemental Signals ── */}
+                    {(() => {
+                      const m = NEOPOLI_MARKETS.find(x => x.id === neopoliMarket) || NEOPOLI_MARKETS[0];
+                      const s = GROUND_SCORE_SUPPLEMENTAL[m.id] || {};
+                      const allS = Object.values(GROUND_SCORE_SUPPLEMENTAL);
+
+                      // Universe-relative normalization
+                      const uniRange = (key) => {
+                        const vals = allS.map(x => x[key]).filter(v => v != null);
+                        return { min: Math.min(...vals), max: Math.max(...vals) };
+                      };
+                      const norm = (val, min, max) => max === min ? 50 : Math.round(((val - min) / (max - min)) * 100);
+
+                      // Log-normalize for federal investment (heavy outlier skew)
+                      const logNorm = (val, key) => {
+                        const logVals = allS.map(x => Math.log((x[key] || 0) + 1));
+                        const lMin = Math.min(...logVals), lMax = Math.max(...logVals);
+                        return lMax === lMin ? 50 : Math.round(((Math.log(val + 1) - lMin) / (lMax - lMin)) * 100);
+                      };
+
+                      const fmtM = (v) => v == null ? "—" : v >= 1000 ? `$${(v/1000).toFixed(1)}B` : `$${v}M`;
+                      const { min: app4Min, max: app4Max } = uniRange("app_4yr");
+                      const { min: estabMin, max: estabMax } = uniRange("estab");
+                      const { min: ozMin, max: ozMax } = uniRange("oz_tracts");
+                      const { min: bfMin, max: bfMax } = uniRange("epa_brownfields");
+
+                      // Signal: 2=StrongTailwind 1=Tailwind 0=Neutral -1=Headwind -2=StrongHeadwind
+                      // National ZHVI benchmarks (2020–2025-03 and 2023–2025-03)
+                      const NAT_4YR = 47; // ~national all-homes ZHVI 4-yr appreciation
+                      const NAT_2YR = 9;  // ~national all-homes ZHVI 2-yr appreciation (post rate hike)
+                      const { min: app2Min, max: app2Max } = uniRange("app_2yr");
+
+                      const signals = [
+                        {
+                          label: "4-Yr Appreciation (2020–2025)",
+                          val: s.app_4yr != null ? `${s.app_4yr > 0 ? "+" : ""}${s.app_4yr}%` : "—",
+                          sub: s.zhvi_latest ? `$${s.zhvi_latest.toLocaleString()} latest · $${s.zhvi_2020?.toLocaleString()} in 2020 · national avg ~+${NAT_4YR}%` : null,
+                          // National avg ~47% over this period (pandemic boom lifted all boats).
+                          // Above national = market caught the wave — basis compressed. Well above = headwind.
+                          // Below national = relative basis better preserved — potential tailwind.
+                          signal: s.app_4yr == null ? 0 : s.app_4yr < 0 ? -2 : s.app_4yr < 20 ? 2 : s.app_4yr < NAT_4YR ? 2 : s.app_4yr <= NAT_4YR + 15 ? 0 : -1,
+                          barPct: s.app_4yr != null ? norm(s.app_4yr, app4Min, app4Max) : 0,
+                          interp: s.app_4yr == null ? "No data." : s.app_4yr < 0 ? "Negative appreciation — demand absent even during the pandemic boom. Entry basis deteriorating." : s.app_4yr < NAT_4YR ? `+${s.app_4yr}% vs. national avg ~+${NAT_4YR}% — below-average run-up; basis better preserved than most markets nationally.` : s.app_4yr <= NAT_4YR + 15 ? `+${s.app_4yr}% vs. national avg ~+${NAT_4YR}% — at or near national pace; this market caught the pandemic wave like most others.` : `+${s.app_4yr}% vs. national avg ~+${NAT_4YR}% — meaningfully above national pace; basis compressed relative to 2020 entry points.`,
+                          source: "Zillow ZHVI",
+                        },
+                        {
+                          label: "2-Yr Appreciation (post rate hike)",
+                          val: s.app_2yr != null ? `${s.app_2yr > 0 ? "+" : ""}${s.app_2yr}%` : "—",
+                          sub: `2023–2025 · national avg ~+${NAT_2YR}% · tests demand durability post-hike`,
+                          // Post-hike period strips pandemic distortion. Markets holding appreciation here have durable demand.
+                          // Well above national = strong durable demand = tailwind.
+                          // Near/below national = demand faded after rates rose = neutral/headwind.
+                          // Negative = demand fully reversed = strong headwind.
+                          signal: s.app_2yr == null ? 0 : s.app_2yr < 0 ? -2 : s.app_2yr < NAT_2YR - 3 ? -1 : s.app_2yr < NAT_2YR + 8 ? 1 : 2,
+                          barPct: s.app_2yr != null ? norm(s.app_2yr, app2Min, app2Max) : 0,
+                          interp: s.app_2yr == null ? "No data." : s.app_2yr < 0 ? "Negative post-hike appreciation — demand has fully reversed. Pandemic gains giving back." : s.app_2yr < NAT_2YR ? `+${s.app_2yr}% vs. national avg ~+${NAT_2YR}% post-hike — below national pace; demand momentum faded as rates rose.` : s.app_2yr < NAT_2YR + 8 ? `+${s.app_2yr}% vs. national avg ~+${NAT_2YR}% post-hike — holding above national pace; demand durable despite rate environment.` : `+${s.app_2yr}% vs. national avg ~+${NAT_2YR}% post-hike — well above national pace; strong durable demand signal independent of pandemic distortion.`,
+                          source: "Zillow ZHVI",
+                        },
+                        {
+                          label: "Federal Investment (FY24)",
+                          val: fmtM(s.usaspending_fy24_m),
+                          sub: null,
+                          signal: s.usaspending_fy24_m == null ? 0 : s.usaspending_fy24_m < 700 ? -1 : s.usaspending_fy24_m < 2500 ? 1 : 2,
+                          barPct: s.usaspending_fy24_m != null ? logNorm(s.usaspending_fy24_m, "usaspending_fy24_m") : 0,
+                          interp: s.usaspending_fy24_m == null ? "No data." : s.usaspending_fy24_m < 700 ? "Low federal capital deployment — limited government investment signal in county." : s.usaspending_fy24_m < 2500 ? "Moderate federal investment presence — active capital flow from public programs." : "High federal investment footprint — strong public capital deployment and contracting signal.",
+                          source: "USASpending FY2024",
+                        },
+                        {
+                          label: "Opportunity Zone Tracts",
+                          val: s.oz_tracts != null ? `${s.oz_tracts} tract${s.oz_tracts !== 1 ? "s" : ""}` : "—",
+                          sub: null,
+                          signal: s.oz_tracts == null ? 0 : s.oz_tracts === 0 ? -1 : s.oz_tracts <= 5 ? 1 : 2,
+                          barPct: s.oz_tracts != null ? norm(s.oz_tracts, ozMin, ozMax) : 0,
+                          interp: s.oz_tracts == null ? "No data." : s.oz_tracts === 0 ? "No OZ tracts — federal tax incentive infrastructure absent from this county." : s.oz_tracts <= 5 ? `${s.oz_tracts} OZ tract${s.oz_tracts > 1 ? "s" : ""} — partial incentive coverage; some tax-advantaged capital eligible.` : `${s.oz_tracts} OZ tracts — broad coverage; strong federal tax-advantaged investment infrastructure in place.`,
+                          source: "HUD / IRS §1400Z",
+                        },
+                        {
+                          label: "Business Establishments",
+                          val: s.estab ? s.estab.toLocaleString() : "—",
+                          // National context: avg firm size vs. national ~15; estab count vs. national county scale
+                          // Bar = peer-relative (ranks this market within the 15 candidates)
+                          // Signal + interp = national context (is this economically substantial nationally?)
+                          sub: (() => {
+                            const avgFirm = s.estab && s.emp ? Math.round(s.emp / s.estab) : null;
+                            const natAvgFirm = 15;
+                            return s.estab && s.emp
+                              ? `${s.emp.toLocaleString()} employees · avg firm size ${avgFirm} vs. national avg ~${natAvgFirm}`
+                              : null;
+                          })(),
+                          signal: s.estab == null ? 0 : s.estab < 2000 ? -1 : s.estab < 5000 ? 1 : s.estab < 15000 ? 2 : 2,
+                          barPct: s.estab != null ? norm(s.estab, estabMin, estabMax) : 0,
+                          interp: s.estab == null ? "No data." : (() => {
+                            const avgFirm = s.estab && s.emp ? Math.round(s.emp / s.estab) : null;
+                            const firmNote = avgFirm ? (avgFirm <= 15 ? " Avg firm size at or below national avg (~15) — diverse small-business economy." : avgFirm <= 22 ? " Avg firm size slightly above national avg (~15) — moderate employer concentration." : " Avg firm size well above national avg (~15) — more concentrated employment base.") : "";
+                            return s.estab < 2000
+                              ? `Thin business base nationally — fewer than 2,000 establishments is a small economic footprint for a development candidate.${firmNote}`
+                              : s.estab < 5000
+                              ? `Moderate national footprint — ${s.estab.toLocaleString()} establishments is a workable but modest economic base.${firmNote}`
+                              : s.estab < 15000
+                              ? `Solid national footprint — ${s.estab.toLocaleString()} establishments indicates a real economic ecosystem with absorption capacity.${firmNote}`
+                              : `Large national footprint — ${s.estab.toLocaleString()} establishments places this market among meaningfully sized U.S. county economies.${firmNote}`;
+                          })(),
+                          source: "Census CBP 2023",
+                        },
+                        {
+                          label: "Brownfield Sites",
+                          val: s.epa_brownfields != null ? `${s.epa_brownfields} sites` : "—",
+                          sub: null,
+                          // Inverted: fewer is better
+                          signal: s.epa_brownfields == null ? 0 : s.epa_brownfields <= 10 ? 2 : s.epa_brownfields <= 30 ? 1 : s.epa_brownfields <= 100 ? -1 : -2,
+                          barPct: s.epa_brownfields != null ? 100 - norm(s.epa_brownfields, bfMin, bfMax) : 0,
+                          interp: s.epa_brownfields == null ? "No data." : s.epa_brownfields <= 10 ? "Low brownfield burden — minimal environmental friction for site development." : s.epa_brownfields <= 30 ? "Moderate brownfield presence — targeted remediation likely in select parcels." : s.epa_brownfields <= 100 ? "Elevated brownfield density — meaningful remediation burden; parcel-level diligence required." : "High brownfield concentration — significant cleanup liability and development friction.",
+                          source: "EPA ACRES/FRS",
+                        },
+                      ];
+
+                      const tailwinds = signals.filter(d => d.signal > 0);
+                      const headwinds = signals.filter(d => d.signal < 0);
+
+                      const sigColor = (sig) => sig >= 1 ? C.greenLight : sig <= -1 ? "#e57373" : C.muted;
+                      const sigLabel = (sig) => sig === 2 ? "Strong Tailwind" : sig === 1 ? "Tailwind" : sig === 0 ? "Neutral" : sig === -1 ? "Headwind" : "Strong Headwind";
+                      const sigIcon  = (sig) => sig > 0 ? "▲" : sig < 0 ? "▼" : "—";
+
+                      return (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            <SectionHeader title="Supplemental Signals" sub="External data benchmarked against 15-market candidate universe · signal = thesis impact" />
+                            <Box sx={{ overflowX: "auto" }}>
+                              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                <thead>
+                                  <tr>
+                                    {["Signal", "Metric", "Relative Position", "Value", "Interpretation"].map(h => (
+                                      <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {signals.map((d, i) => {
+                                    const sc = sigColor(d.signal);
+                                    return (
+                                      <tr key={d.label} style={{ background: i % 2 === 0 ? "transparent" : C.bg, borderBottom: `1px solid ${C.border}` }}>
+                                        <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
+                                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: sc, background: sc + "18", border: `1px solid ${sc}44`, borderRadius: 4, padding: "2px 7px" }}>
+                                            <span style={{ fontSize: 9 }}>{sigIcon(d.signal)}</span>{sigLabel(d.signal)}
+                                          </span>
+                                        </td>
+                                        <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
+                                          <span style={{ fontWeight: 600, color: C.charcoal, fontSize: 11 }}>{d.label}</span>
+                                          {d.sub && <><br /><span style={{ fontSize: 9, color: C.muted }}>{d.sub}</span></>}
+                                        </td>
+                                        <td style={{ padding: "8px 10px", minWidth: 110 }}>
+                                          <Box sx={{ height: 6, background: C.border, borderRadius: 3, width: "100%", minWidth: 90 }}>
+                                            <Box sx={{ width: `${d.barPct}%`, height: "100%", background: sc, borderRadius: 3, transition: "width 0.3s" }} />
+                                          </Box>
+                                        </td>
+                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: sc, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums", fontSize: 12 }}>{d.val}</td>
+                                        <td style={{ padding: "8px 10px", color: C.muted, lineHeight: 1.45, fontSize: 11 }}>{d.interp}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </Box>
+                            <Box sx={{ pt: 1.5, mt: 1, borderTop: `1px solid ${C.border}` }}>
+                              <Typography sx={{ fontSize: 9, color: C.muted, lineHeight: 1.7, letterSpacing: "0.02em" }}>
+                                <span style={{ fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Data Sources — </span>
+                                <span style={{ fontWeight: 600 }}>Composite &amp; Dimension Scores:</span> Deterministic Ground Score screening run 2026-03-27 · U.S. Census Bureau QuickFacts · BLS · DOE · official public sources · scoring mode: universe-relative (0–100 within evaluated set, not national percentile).{" "}
+                                <span style={{ fontWeight: 600 }}>Home Value Trajectory:</span> Zillow ZHVI · SF &amp; condo · smoothed, seasonally adjusted · county · vintage 2025-03.{" "}
+                                <span style={{ fontWeight: 600 }}>Federal Investment:</span> USASpending.gov · FY2024 · contracts &amp; grants · place of performance · county.{" "}
+                                <span style={{ fontWeight: 600 }}>Opportunity Zones:</span> HUD / IRS §1400Z · designated QOZ census tracts · 2018 · via HUD ArcGIS.{" "}
+                                <span style={{ fontWeight: 600 }}>Business Base:</span> Census CBP 2023 · all industries · private sector.{" "}
+                                <span style={{ fontWeight: 600 }}>Environmental Context:</span> EPA FRS / ACRES · brownfield assessment &amp; cleanup sites · county.{" "}
+                                Composite scores are fixed and are <span style={{ fontStyle: "italic" }}>not</span> recalculated from supplemental data. Supplemental signals are informational context only. Relative Position bar shows this market's position within the 15-market candidate universe. Signal and interpretation reference national benchmarks where noted in the sub-label.
+                              </Typography>
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      );
+                    })()}
+
+                  </Box>}
+
+                  {/* ── Opportunity Urban Signals Pane ── */}
+                  {chartPane === "opportunity" && <Box sx={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+
+                    {/* Market Summary */}
+                    {(() => {
+                      const m = NEOPOLI_MARKETS.find(x => x.id === neopoliMarket) || NEOPOLI_MARKETS[0];
+                      const opp = OPPORTUNITY_SCORES[m.id] || { composite: 0, confidence: 0, tier: "deprioritized", dims: {} };
+                      const tierMeta = NEOPOLI_TIER_META[opp.tier] || NEOPOLI_TIER_META.deprioritized;
+                      const dimScores = OPPORTUNITY_DIMS.map(d => ({ label: d.label, score: opp.dims[d.id] ?? 0, weight: d.weight }));
+                      const sorted = [...dimScores].sort((a, b) => b.score - a.score);
+                      const top3 = sorted.slice(0, 3);
+                      const bot3 = sorted.slice(-3).reverse();
+                      const oppRank = [...NEOPOLI_MARKETS].sort((a, b) => (OPPORTUNITY_SCORES[b.id]?.composite || 0) - (OPPORTUNITY_SCORES[a.id]?.composite || 0)).findIndex(x => x.id === m.id) + 1;
+                      const topStr = top3.map(d => `${d.label} (${d.score.toFixed(0)})`).join(", ");
+                      const botStr = bot3.map(d => `${d.label} (${d.score.toFixed(0)})`).join(", ");
+                      return (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", mb: 1.25, flexWrap: "wrap", gap: 1 }}>
+                              <Box sx={{ mb: 2, pb: 1, borderBottom: `2px solid ${C.navy}` }}>
+                                <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.09em" }}>{m.name}, {m.state} · Opportunity Assessment</Typography>
+                                <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.25 }}>
+                                  {m.county} · opportunity rank #{oppRank} of 15 · opportunity score {opp.composite.toFixed(1)} · confidence {opp.confidence.toFixed(0)}%
+                                </Typography>
+                              </Box>
+                              <span style={{ fontSize: 10, fontWeight: 700, color: tierMeta.color, background: tierMeta.badgeBg || tierMeta.color + "18", border: `1px solid ${tierMeta.badgeBg ? tierMeta.color + "88" : tierMeta.color + "44"}`, borderRadius: 4, padding: "3px 10px", whiteSpace: "nowrap", alignSelf: "flex-start" }}>{tierMeta.label}</span>
+                            </Box>
+                            <Typography sx={{ fontSize: 12, color: C.charcoal, lineHeight: 1.7, mb: 1.5 }}>
+                              {m.name} is a Contrarian Urban Signals candidate evaluated here against master-planned community development criteria. With an Opportunity Score of {opp.composite.toFixed(1)}, it ranks {oppRank} of 15 in this universe — all of which are expected to score poorly, as the current candidate set was selected for distressed-market activation, not greenfield development. This comparison serves as a baseline and validates thesis separation between the two strategies.
+                            </Typography>
+                            <Box sx={{ pt: 1.25, borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 0.75 }}>
+                              <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.65 }}>
+                                <span style={{ fontWeight: 700, color: C.charcoal }}>Relative Strengths — </span>{topStr}
+                              </Typography>
+                              <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.65 }}>
+                                <span style={{ fontWeight: 700, color: C.charcoal }}>Primary Limitations — </span>{botStr}
+                              </Typography>
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      );
+                    })()}
+
+                    {/* Dimension Scorecard */}
+                    {(() => {
+                      const m = NEOPOLI_MARKETS.find(x => x.id === neopoliMarket) || NEOPOLI_MARKETS[0];
+                      const opp = OPPORTUNITY_SCORES[m.id] || { composite: 0, confidence: 0, tier: "deprioritized", dims: {} };
+                      const tierMeta = NEOPOLI_TIER_META[opp.tier] || NEOPOLI_TIER_META.deprioritized;
+                      return (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.5, flexWrap: "wrap", gap: 1 }}>
+                              <SectionHeader title="Opportunity Dimension Scorecard" sub="12 MPD site-selection dimensions · scored within 15-market universe" />
+                              <button onClick={() => setShowDimDesc(v => !v)} style={{ fontSize: 10, color: C.muted, background: "none", border: `1px solid ${C.border}`, borderRadius: 4, padding: "3px 9px", cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>{showDimDesc ? "Hide descriptions" : "Show descriptions"}</button>
+                            </Box>
+                            <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                              {OPPORTUNITY_DIMS.map(dim => {
+                                const score = opp.dims[dim.id] ?? 0;
+                                const barColor = score >= 65 ? C.greenLight : score >= 40 ? C.blue : "#e57373";
+                                return (
+                                  <Box key={dim.id}>
+                                    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 0.3 }}>
+                                      <Typography sx={{ fontSize: 11, fontWeight: 600, color: C.charcoal }}>{dim.label}</Typography>
+                                      <Typography sx={{ fontSize: 11, fontWeight: 700, color: barColor }}>{score.toFixed(0)}</Typography>
+                                    </Box>
+                                    <Box sx={{ height: 6, background: C.border, borderRadius: 3 }}>
+                                      <Box sx={{ width: `${score}%`, height: "100%", background: barColor, borderRadius: 3, transition: "width 0.3s" }} />
+                                    </Box>
+                                    <span style={{ fontSize: 9, color: C.muted, display: "block", marginTop: 3 }}><span style={{ fontWeight: 700 }}>wt {dim.weight}</span>{showDimDesc && <> · {dim.desc}</>}</span>
+                                  </Box>
+                                );
+                              })}
+                            </Box>
+                            <Box sx={{ mt: 2, pt: 1.5, borderTop: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                              <Typography sx={{ fontSize: 11, color: C.muted }}>Opportunity Score</Typography>
+                              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+                                <Box sx={{ width: 120, height: 8, background: C.border, borderRadius: 4 }}>
+                                  <Box sx={{ width: `${opp.composite}%`, height: "100%", background: tierMeta.barColor, borderRadius: 4 }} />
+                                </Box>
+                                <Typography sx={{ fontSize: 14, fontWeight: 800, color: C.navy }}>{opp.composite.toFixed(1)}</Typography>
+                                <span style={{ fontSize: 10, fontWeight: 700, color: tierMeta.color, background: tierMeta.badgeBg || tierMeta.color + "18", border: `1px solid ${tierMeta.badgeBg ? tierMeta.color + "88" : tierMeta.color + "44"}`, borderRadius: 4, padding: "2px 8px" }}>{tierMeta.label}</span>
+                              </Box>
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      );
+                    })()}
+
+                    {/* Supplemental Signals */}
+                    {(() => {
+                      const m = NEOPOLI_MARKETS.find(x => x.id === neopoliMarket) || NEOPOLI_MARKETS[0];
+                      const s = OPPORTUNITY_SUPPLEMENTAL[m.id] || {};
+                      const allS = Object.values(OPPORTUNITY_SUPPLEMENTAL);
+                      const norm = (v, arr) => { const mn = Math.min(...arr), mx = Math.max(...arr); return mx === mn ? 50 : Math.round(((v - mn) / (mx - mn)) * 100); };
+                      const driveArr = allS.map(x => x.metro_drive_min);
+                      const popArr   = allS.map(x => x.county_pop_growth_5yr);
+                      const hhiArr   = allS.map(x => x.median_hhi);
+                      const schoolArr= allS.map(x => x.school_rating);
+                      const landArr  = allS.map(x => x.land_price_acre);
+                      const permitArr= allS.map(x => x.permits_per_1k);
+
+                      const driveSignal = s.metro_drive_min == null ? 0 : s.metro_drive_min <= 30 ? 2 : s.metro_drive_min <= 60 ? 1 : s.metro_drive_min <= 90 ? 0 : s.metro_drive_min <= 120 ? -1 : -2;
+                      const popSignal   = s.county_pop_growth_5yr == null ? 0 : s.county_pop_growth_5yr >= 10 ? 2 : s.county_pop_growth_5yr >= 5 ? 1 : s.county_pop_growth_5yr >= 0 ? 0 : s.county_pop_growth_5yr >= -3 ? -1 : -2;
+                      const hhiSignal   = s.median_hhi == null ? 0 : s.median_hhi >= 80000 ? 2 : s.median_hhi >= 65000 ? 1 : s.median_hhi >= 50000 ? 0 : s.median_hhi >= 40000 ? -1 : -2;
+                      const schoolSignal= s.school_rating == null ? 0 : s.school_rating >= 8 ? 2 : s.school_rating >= 6 ? 1 : s.school_rating >= 4 ? 0 : s.school_rating >= 2 ? -1 : -2;
+                      const landSignal  = s.land_price_acre == null ? 0 : s.land_price_acre <= 8000 ? 2 : s.land_price_acre <= 15000 ? 1 : s.land_price_acre <= 25000 ? 0 : s.land_price_acre <= 40000 ? -1 : -2;
+                      const permitSignal= s.permits_per_1k == null ? 0 : s.permits_per_1k >= 15 ? 2 : s.permits_per_1k >= 10 ? 1 : s.permits_per_1k >= 5 ? 0 : s.permits_per_1k >= 2 ? -1 : -2;
+
+                      const signals = [
+                        { label: "Metro Drive Time", sub: "minutes to nearest major employment center", val: s.metro_drive_min != null ? `${s.metro_drive_min === 0 ? "N/A (is metro)" : s.metro_drive_min + " min"}` : "—", signal: driveSignal, barPct: s.metro_drive_min != null ? 100 - norm(s.metro_drive_min, driveArr) : 0, interp: s.metro_drive_min == null ? "No data." : s.metro_drive_min === 0 ? "Market is itself a mid-size metro — no commute to a larger center applies. Standalone demand dynamics." : s.metro_drive_min <= 30 ? "Excellent metro proximity — households can commute daily to a major job center, the primary driver of MPD demand." : s.metro_drive_min <= 60 ? "Acceptable commute range — within the typical household tolerance for suburban relocation." : s.metro_drive_min <= 90 ? "Marginal commute range — demand depends on remote-work prevalence and strong lifestyle differentiators." : "Too distant from major employment — household demand for an MPD here would be speculative without a local job anchor.", source: "Estimated driving distance" },
+                        { label: "County Pop. Growth", sub: "5-year change · MPD demand signal", val: s.county_pop_growth_5yr != null ? `${s.county_pop_growth_5yr > 0 ? "+" : ""}${s.county_pop_growth_5yr.toFixed(1)}%` : "—", signal: popSignal, barPct: s.county_pop_growth_5yr != null ? norm(s.county_pop_growth_5yr, popArr) : 0, interp: s.county_pop_growth_5yr == null ? "No data." : s.county_pop_growth_5yr >= 10 ? "Strong confirmed in-migration — the county is an established growth destination, ideal for MPD absorption." : s.county_pop_growth_5yr >= 5 ? "Positive growth trajectory — meaningful demand pipeline building in the region." : s.county_pop_growth_5yr >= 0 ? "Flat to modest growth — demand is not contracting but lacks the momentum to absorb significant new inventory quickly." : s.county_pop_growth_5yr >= -3 ? "Moderate population decline — headwind for MPD absorption; speculative without a specific demand catalyst." : "Significant population decline — a master-planned community here would face severe absorption risk.", source: "U.S. Census Bureau estimates" },
+                        { label: "Median Household Income", sub: "buyer qualification proxy", val: s.median_hhi != null ? `$${(s.median_hhi / 1000).toFixed(0)}k` : "—", signal: hhiSignal, barPct: s.median_hhi != null ? norm(s.median_hhi, hhiArr) : 0, interp: s.median_hhi == null ? "No data." : s.median_hhi >= 80000 ? "Strong income base — households can qualify for new construction pricing; supports premium product positioning." : s.median_hhi >= 65000 ? "Adequate income base — supports mid-market new home pricing with manageable qualification risk." : s.median_hhi >= 50000 ? "Moderate income — constrains new home pricing; would require entry-level or workforce product focus." : s.median_hhi >= 40000 ? "Below-average income — significant qualification headwind for new construction; affordability risk is real." : "Low income base — new home pricing would exceed local qualification capacity; demand must rely on in-migrating households.", source: "U.S. Census Bureau ACS" },
+                        { label: "School District Rating", sub: "GreatSchools-style composite (0–10)", val: s.school_rating != null ? `${s.school_rating.toFixed(1)} / 10` : "—", signal: schoolSignal, barPct: s.school_rating != null ? norm(s.school_rating, schoolArr) : 0, interp: s.school_rating == null ? "No data." : s.school_rating >= 8 ? "High-quality district — a primary draw for family households; supports premium home pricing and fast absorption." : s.school_rating >= 6 ? "Above-average district — competitive enough to attract family buyers; a real positive for community positioning." : s.school_rating >= 4 ? "Average district — not a barrier but also not a draw; community branding must rely on other lifestyle factors." : s.school_rating >= 2 ? "Below-average district — a meaningful negative for family household targeting; would limit buyer profile." : "Poor district quality — a significant headwind for family-targeted MPD positioning; school investment required.", source: "GreatSchools / state assessments" },
+                        { label: "Fringe Land Price", sub: "estimated $/acre at urban edge", val: s.land_price_acre != null ? `$${(s.land_price_acre / 1000).toFixed(0)}k/ac` : "—", signal: landSignal, barPct: s.land_price_acre != null ? 100 - norm(s.land_price_acre, landArr) : 0, interp: s.land_price_acre == null ? "No data." : s.land_price_acre <= 8000 ? "Very low land cost — strong basis advantage for MPD; minimal land carry before development." : s.land_price_acre <= 15000 ? "Affordable land — supportive MPD economics; acquisition at scale is viable without heavy capital drag." : s.land_price_acre <= 25000 ? "Moderate land cost — manageable for a well-capitalized developer; watch for cost creep at scale." : s.land_price_acre <= 40000 ? "Elevated land cost — puts pressure on lot pricing and margin; requires strong absorption rates to underwrite." : "High land cost — a significant headwind for MPD economics at scale; limits return profile.", source: "Estimated market comps" },
+                        { label: "Permit Activity", sub: "residential permits per 1,000 residents (annualized)", val: s.permits_per_1k != null ? `${s.permits_per_1k.toFixed(1)} / 1k` : "—", signal: permitSignal, barPct: s.permits_per_1k != null ? norm(s.permits_per_1k, permitArr) : 0, interp: s.permits_per_1k == null ? "No data." : s.permits_per_1k >= 15 ? "Very high permit velocity — proven construction demand; existing market absorbs new supply effectively." : s.permits_per_1k >= 10 ? "Strong permit activity — active development market with demonstrated absorption capacity." : s.permits_per_1k >= 5 ? "Moderate permit activity — market supports some new construction but is not a high-growth corridor." : s.permits_per_1k >= 2 ? "Low permit activity — limited organic demand signal; an MPD would be swimming against the current." : "Very low permits — construction market is dormant; demand does not support new community development.", source: "Census Bureau Building Permits Survey" },
+                      ];
+
+                      const sigColor = (sig) => sig >= 1 ? C.greenLight : sig <= -1 ? "#e57373" : C.muted;
+                      const sigLabel = (sig) => sig === 2 ? "Strong Tailwind" : sig === 1 ? "Tailwind" : sig === 0 ? "Neutral" : sig === -1 ? "Headwind" : "Strong Headwind";
+                      const sigIcon  = (sig) => sig > 0 ? "▲" : sig < 0 ? "▼" : "—";
+
+                      return (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            <SectionHeader title="Supplemental Signals" sub="MPD site-selection indicators · signal = development thesis impact" />
+                            <Box sx={{ overflowX: "auto" }}>
+                              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                <thead>
+                                  <tr>
+                                    {["Signal", "Metric", "Relative Position", "Value", "Interpretation"].map(h => (
+                                      <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {signals.map((d, i) => {
+                                    const sc = sigColor(d.signal);
+                                    return (
+                                      <tr key={d.label} style={{ background: i % 2 === 0 ? "transparent" : C.bg, borderBottom: `1px solid ${C.border}` }}>
+                                        <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
+                                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: sc, background: sc + "18", border: `1px solid ${sc}44`, borderRadius: 4, padding: "2px 7px" }}>
+                                            <span style={{ fontSize: 9 }}>{sigIcon(d.signal)}</span>{sigLabel(d.signal)}
+                                          </span>
+                                        </td>
+                                        <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
+                                          <span style={{ fontWeight: 600, color: C.charcoal, fontSize: 11 }}>{d.label}</span>
+                                          {d.sub && <><br /><span style={{ fontSize: 9, color: C.muted }}>{d.sub}</span></>}
+                                        </td>
+                                        <td style={{ padding: "8px 10px", minWidth: 110 }}>
+                                          <Box sx={{ height: 6, background: C.border, borderRadius: 3, width: "100%", minWidth: 90 }}>
+                                            <Box sx={{ width: `${d.barPct}%`, height: "100%", background: sc, borderRadius: 3, transition: "width 0.3s" }} />
+                                          </Box>
+                                        </td>
+                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: sc, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums", fontSize: 12 }}>{d.val}</td>
+                                        <td style={{ padding: "8px 10px", color: C.muted, lineHeight: 1.45, fontSize: 11 }}>{d.interp}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </Box>
+                            <Box sx={{ pt: 1.5, mt: 1, borderTop: `1px solid ${C.border}` }}>
+                              <Typography sx={{ fontSize: 9, color: C.muted, lineHeight: 1.7, letterSpacing: "0.02em" }}>
+                                <span style={{ fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Data Sources — </span>
+                                <span style={{ fontWeight: 600 }}>Opportunity Scores:</span> Deterministic scoring run 2026-03-28 · same 15-market universe as Contrarian tab · scored against MPD site-selection criteria.{" "}
+                                <span style={{ fontWeight: 600 }}>Metro Drive Time:</span> Estimated driving distance to nearest major employment center.{" "}
+                                <span style={{ fontWeight: 600 }}>Population Growth:</span> U.S. Census Bureau county population estimates · 5-year change.{" "}
+                                <span style={{ fontWeight: 600 }}>Household Income:</span> U.S. Census Bureau ACS · median household income.{" "}
+                                <span style={{ fontWeight: 600 }}>School Rating:</span> GreatSchools composite / state assessment data.{" "}
+                                <span style={{ fontWeight: 600 }}>Land Price:</span> Estimated market comps for vacant/agricultural fringe land.{" "}
+                                <span style={{ fontWeight: 600 }}>Permits:</span> Census Bureau Building Permits Survey · annualized per 1,000 residents. Scores are universe-relative (0–100 within evaluated set). All 15 markets are expected to score poorly — this view serves as a baseline until dedicated Opportunity candidates are added.
+                              </Typography>
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      );
+                    })()}
+
                   </Box>}
 
                 </Box>
