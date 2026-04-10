@@ -23,6 +23,7 @@ const sync = (excludeHtml = false, cacheControl, contentType = "") => {
     join(__dirname, "..", "build").replace(/\\/g, "/"),
     `s3://${bucket}`,
     "--delete",
+    '--exclude "ground-score/*"',  // never delete pipeline data
     `--cache-control "${cacheControl}"`,
     excludeHtml ? '--exclude "*.html"' : "",
     !excludeHtml ? '--exclude "*.*" --include "*.html"' : "",
