@@ -36,3 +36,13 @@
     transform: rotate(360deg);
   }
 }
+
+/* Nav tab hover */
+.nav-tab:hover {
+  background: rgba(0,0,0,0.04) !important;
+  color: #1a2744 !important;
+}
+.nav-tab-orange:hover {
+  background: rgba(0,0,0,0.04) !important;
+  color: #e07b2e !important;
+}

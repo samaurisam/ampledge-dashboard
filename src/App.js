@@ -278,6 +278,406 @@ const _hpaOutlook = (met, kalshiMtgMedian = null) => {
   return { label, color, score: composite, hpaLow, hpaHigh, drivers: scores };
 };
 
+// ─── Formation Markets Scoring Model ─────────────────────────────────────────
+// Identifies greenfield master-planned community (MPC) sites: growth corridors
+// with land still available, rising demand, and development-ready infrastructure.
+// 5 dimensions — all computed client-side from pipeline metrics.
+const _formationScore = (met) => {
+  if (!met) return null;
+  const dims = [];
+
+  // 1. Demographic Momentum (30%) — pop growth + net migration
+  {
+    const pg  = met.pop_growth_pct;    // % CAGR
+    const nm  = met.net_migration_rate; // % pop
+    if (pg != null || nm != null) {
+      const pgS = pg  != null ? (pg  > 3 ? 1.0 : pg  > 1.5 ? 0.8 : pg  > 0.5 ? 0.55 : pg > 0 ? 0.3 : 0.05) : 0.5;
+      const nmS = nm  != null ? (nm  > 2 ? 1.0 : nm  > 0.5 ? 0.75 : nm  > 0 ? 0.45 : nm > -0.5 ? 0.2 : 0.0) : 0.5;
+      const s = pg != null && nm != null ? (pgS + nmS) / 2 : pg != null ? pgS : nmS;
+      dims.push({ id: "demo_momentum", label: "Demographic Momentum", weight: 0.30, score: s,
+        value: pg != null ? `${pg >= 0 ? "+" : ""}${pg.toFixed(1)}%` : `${nm >= 0 ? "+" : ""}${nm?.toFixed(1)}%`,
+        detail: [pg != null ? "pop growth" : null, nm != null ? `${nm >= 0 ? "+" : ""}${nm.toFixed(1)}% migration` : null].filter(Boolean).join(" · ") });
+    }
+  }
+
+  // 2. Greenfield Potential (25%) — low density + affordable land cost
+  {
+    const dens = met.pop_density;           // pop/sq mi — lower is better
+    const land = met.farmland_value_acre;   // $/acre — lower is better
+    if (dens != null || land != null) {
+      const dS = dens != null ? (dens < 50 ? 1.0 : dens < 150 ? 0.75 : dens < 400 ? 0.45 : dens < 1000 ? 0.2 : 0.0) : 0.5;
+      const lS = land != null ? (land < 2500 ? 1.0 : land < 5000 ? 0.75 : land < 10000 ? 0.45 : land < 20000 ? 0.2 : 0.0) : 0.5;
+      const s = dens != null && land != null ? (dS + lS) / 2 : dens != null ? dS : lS;
+      dims.push({ id: "greenfield", label: "Greenfield Potential", weight: 0.25, score: s,
+        value: dens != null ? `${dens.toFixed(0)} /sq mi` : land != null ? `$${(land / 1000).toFixed(1)}k/ac` : "—",
+        detail: [dens != null ? `${dens.toFixed(0)} pop/sq mi` : null, land != null ? `$${(land / 1000).toFixed(1)}k/ac land` : null].filter(Boolean).join(" · ") });
+    }
+  }
+
+  // 3. Development Velocity (20%) — permit activity signals builder appetite + local approvals
+  {
+    const permits = met.permit_units_per_1k; // units/1k pop
+    if (permits != null) {
+      const s = permits > 10 ? 1.0 : permits > 5 ? 0.8 : permits > 2 ? 0.55 : permits > 0.5 ? 0.3 : 0.05;
+      dims.push({ id: "dev_velocity", label: "Development Velocity", weight: 0.20, score: s,
+        value: `${permits.toFixed(1)} u/1k`,
+        detail: "residential permits per 1k pop" });
+    }
+  }
+
+  // 4. Employment Growth (15%) — rising jobs precede housing demand
+  {
+    const eg = met.emp_growth_pct; // % YoY
+    if (eg != null) {
+      const s = eg > 4 ? 1.0 : eg > 2 ? 0.78 : eg > 0.5 ? 0.55 : eg > 0 ? 0.3 : 0.05;
+      dims.push({ id: "emp_growth", label: "Employment Growth", weight: 0.15, score: s,
+        value: `${eg >= 0 ? "+" : ""}${eg.toFixed(1)}%`,
+        detail: "YoY covered employment" });
+    }
+  }
+
+  // 5. Buyer Quality (10%) — entry-level affordability for MPC target demographic
+  {
+    const hhi   = met.median_hhi;        // $
+    const hpaG  = met.zhvi_growth_1yr;   // appreciation signal
+    if (hhi != null || hpaG != null) {
+      const hhiS = hhi    != null ? (hhi > 80000 ? 1.0 : hhi > 60000 ? 0.75 : hhi > 45000 ? 0.45 : 0.2) : 0.5;
+      const hpaS = hpaG   != null ? (hpaG > 0.05 ? 1.0 : hpaG > 0.02 ? 0.7 : hpaG > 0 ? 0.4 : 0.15) : 0.5;
+      const s = hhi != null && hpaG != null ? (hhiS + hpaS) / 2 : hhi != null ? hhiS : hpaS;
+      dims.push({ id: "buyer_quality", label: "Buyer Quality", weight: 0.10, score: s,
+        value: hhi != null ? `$${(hhi / 1000).toFixed(0)}k HHI` : `${(hpaG * 100).toFixed(1)}% HPA`,
+        detail: [hhi != null ? `$${(hhi / 1000).toFixed(0)}k median HHI` : null, hpaG != null ? `${(hpaG * 100).toFixed(1)}% YoY HPA` : null].filter(Boolean).join(" · ") });
+    }
+  }
+
+  if (dims.length === 0) return null;
+  const totalW   = dims.reduce((s, d) => s + d.weight, 0);
+  const composite = dims.reduce((s, d) => s + d.score * d.weight, 0) / totalW;
+
+  let tier, tierColor;
+  if (composite >= 0.75) { tier = "Prime Site"; tierColor = "#27ae60"; }
+  else if (composite >= 0.58) { tier = "High Potential"; tierColor = "#52c27a"; }
+  else if (composite >= 0.42) { tier = "Emerging"; tierColor = "#7fa8cc"; }
+  else if (composite >= 0.25) { tier = "Monitor"; tierColor = "#e8a04a"; }
+  else { tier = "Not Ready"; tierColor = "#e57373"; }
+
+  return { composite: composite * 100, tier, tierColor, dims };
+};
+
+// ─── Engineered Markets Scoring Model ────────────────────────────────────────
+// Site optimizer for employer-first land acquisition: which counties provide the
+// best foundation for a designed demand ecosystem (employer + AP housing + MPC).
+// Weights shift based on employer profile input (industry, workforce size, wages).
+const _engineeredScore = (met, profile = {}) => {
+  if (!met) return null;
+  const { industry = "manufacturing", wageLevel = "moderate", landPriority = true } = profile;
+
+  // Weight multipliers based on profile
+  const isIndustrial = industry === "manufacturing" || industry === "logistics";
+  const isTech       = industry === "tech";
+
+  const dims = [];
+
+  // 1. Available Workforce (30%) — unemployed + broader labor pool
+  {
+    const unemp = met.unemployment_rate; // % — higher = more available labor
+    const lfpr  = met.lfpr;              // % — total workforce participation
+    const totEmp = met.total_employment; // scale signal
+    if (unemp != null || lfpr != null) {
+      const uS = unemp != null ? (unemp > 8 ? 1.0 : unemp > 5 ? 0.75 : unemp > 3.5 ? 0.5 : unemp > 2.5 ? 0.3 : 0.1) : 0.5;
+      const lS = lfpr  != null ? (lfpr  > 65 ? 1.0 : lfpr  > 60 ? 0.75 : lfpr  > 55 ? 0.5 : 0.25) : 0.5;
+      const s = unemp != null && lfpr != null ? (uS * 0.6 + lS * 0.4) : unemp != null ? uS : lS;
+      dims.push({ id: "workforce", label: "Available Workforce", weight: 0.30, score: s,
+        value: unemp != null ? `${unemp.toFixed(1)}% unemp` : `${lfpr?.toFixed(1)}% LFPR`,
+        detail: [unemp != null ? `${unemp.toFixed(1)}% unemployed` : null, lfpr != null ? `${lfpr.toFixed(1)}% LFPR` : null, totEmp != null ? `${(totEmp / 1000).toFixed(0)}k jobs` : null].filter(Boolean).join(" · ") });
+    }
+  }
+
+  // 2. Land & Development Cost (25%) — critical for site assembly
+  {
+    const land  = met.farmland_value_acre;  // $/acre
+    const dens  = met.pop_density;          // lower = more available
+    const zhvi  = met.zhvi_latest;          // home price proxy for land premium
+    if (land != null || dens != null) {
+      const lS = land != null ? (land < 2000 ? 1.0 : land < 4000 ? 0.78 : land < 8000 ? 0.5 : land < 15000 ? 0.25 : 0.05) : 0.5;
+      const dS = dens != null ? (dens < 30 ? 1.0 : dens < 80 ? 0.8 : dens < 200 ? 0.55 : dens < 600 ? 0.25 : 0.0) : 0.5;
+      const s = (lS + dS) / 2;
+      dims.push({ id: "land_cost", label: "Land & Dev Cost", weight: landPriority ? 0.25 : 0.15, score: s,
+        value: land != null ? `$${(land / 1000).toFixed(1)}k/ac` : `${dens?.toFixed(0)} /sq mi`,
+        detail: [land != null ? `$${(land / 1000).toFixed(1)}k/ac` : null, dens != null ? `${dens.toFixed(0)} pop/sq mi` : null].filter(Boolean).join(" · ") });
+    }
+  }
+
+  // 3. Infrastructure Readiness (20%) — broadband + metro connectivity (not too remote)
+  {
+    const bb   = met.broadband_pct;          // % coverage
+    const dist = met.drive_min_nearest_metro; // minutes — sweet spot 30–90
+    if (bb != null || dist != null) {
+      const bbS   = bb   != null ? (bb   > 90 ? 1.0 : bb   > 75 ? 0.75 : bb   > 60 ? 0.45 : 0.15) : 0.5;
+      const distS = dist != null ? (dist < 30 ? 0.8 : dist < 60 ? 1.0 : dist < 90 ? 0.75 : dist < 120 ? 0.45 : 0.15) : 0.5;
+      const s = bb != null && dist != null ? (bbS * 0.5 + distS * 0.5) : bb != null ? bbS : distS;
+      dims.push({ id: "infrastructure", label: "Infrastructure", weight: 0.20, score: s,
+        value: dist != null ? `${dist.toFixed(0)} min metro` : `${bb?.toFixed(0)}% BB`,
+        detail: [bb != null ? `${bb.toFixed(0)}% broadband` : null, dist != null ? `${dist.toFixed(0)} min to metro` : null].filter(Boolean).join(" · ") });
+    }
+  }
+
+  // 4. Growth Momentum (15%) — market heading the right direction
+  {
+    const pg = met.pop_growth_pct;
+    const eg = met.emp_growth_pct;
+    if (pg != null || eg != null) {
+      const pgS = pg != null ? (pg > 2 ? 1.0 : pg > 0.5 ? 0.7 : pg > 0 ? 0.4 : 0.1) : 0.5;
+      const egS = eg != null ? (eg > 3 ? 1.0 : eg > 1 ? 0.7 : eg > 0 ? 0.4 : 0.1) : 0.5;
+      const s = pg != null && eg != null ? (pgS + egS) / 2 : pg != null ? pgS : egS;
+      dims.push({ id: "growth_momentum", label: "Growth Momentum", weight: 0.15, score: s,
+        value: pg != null ? `${pg >= 0 ? "+" : ""}${pg.toFixed(1)}% pop` : `${eg >= 0 ? "+" : ""}${eg?.toFixed(1)}% emp`,
+        detail: [pg != null ? `${pg.toFixed(1)}% pop growth` : null, eg != null ? `${eg.toFixed(1)}% emp growth` : null].filter(Boolean).join(" · ") });
+    }
+  }
+
+  // 5. AP Housing Absorption (10%) — can American Pledge program deploy here?
+  {
+    const hhi   = met.median_hhi;
+    const zhvi  = met.zhvi_latest;
+    if (hhi != null && zhvi != null) {
+      const pool = _buyerPoolPct ? _buyerPoolPct(zhvi, hhi, 0.20) : null;
+      const s = pool != null ? (pool > 35 ? 1.0 : pool > 25 ? 0.75 : pool > 15 ? 0.5 : pool > 8 ? 0.25 : 0.05) : 0.5;
+      dims.push({ id: "ap_absorption", label: "AP Absorption", weight: 0.10, score: s,
+        value: pool != null ? `${pool.toFixed(0)}% qualify` : `$${(hhi / 1000).toFixed(0)}k HHI`,
+        detail: pool != null ? `${pool.toFixed(0)}% of HH qualify at 20% down` : `$${(hhi / 1000).toFixed(0)}k median HHI` });
+    }
+  }
+
+  if (dims.length === 0) return null;
+  // Re-normalize in case some dimensions couldn't be computed
+  const totalW    = dims.reduce((s, d) => s + d.weight, 0);
+  const composite = dims.reduce((s, d) => s + d.score * d.weight, 0) / totalW;
+
+  let tier, tierColor;
+  if (composite >= 0.75) { tier = "Prime Target"; tierColor = "#27ae60"; }
+  else if (composite >= 0.58) { tier = "Strong Candidate"; tierColor = "#52c27a"; }
+  else if (composite >= 0.42) { tier = "Viable Site"; tierColor = "#7fa8cc"; }
+  else if (composite >= 0.25) { tier = "Conditional"; tierColor = "#e8a04a"; }
+  else { tier = "Poor Fit"; tierColor = "#e57373"; }
+
+  return { composite: composite * 100, tier, tierColor, dims };
+};
+
+// Generates a renderDeepDive-compatible markdown string for a Formation Markets county
+const _formationNarrative = (name, state, met, fs, rank, total) => {
+  if (!met || !fs) return null;
+  const pct = Math.round((1 - rank / total) * 100);
+  const tierDesc = fs.tier === "Prime Site" ? "a prime greenfield formation candidate" :
+    fs.tier === "Strong Site" ? "a strong formation market" :
+    fs.tier === "Viable Site" ? "a viable but selective formation opportunity" :
+    "a conditional site requiring catalyst support";
+
+  const strong = fs.dims.filter(d => d.score >= 0.65).map(d => d.label);
+  const weak   = fs.dims.filter(d => d.score < 0.38).map(d => d.label);
+
+  const lines = [];
+
+  // Opening paragraph
+  lines.push(`**${name}, ${state}** ranks **#${rank}** of ${total.toLocaleString()} screened counties for master-planned community formation potential, placing it in the **top ${100 - pct}th percentile** — ${tierDesc} for greenfield MPC development.`);
+  if (strong.length) {
+    lines.push(`Formation strength is led by **${strong.slice(0, 2).join("** and **")}**, reflecting the combination of inbound population pressure and site availability that defines high-conviction formation markets.`);
+  }
+  lines.push("");
+
+  // Demand drivers
+  const popGrowth = met.pop_growth_pct;
+  const migration = met.net_migration_rate;
+  const empGrowth = met.emp_growth_pct;
+  const hhi = met.median_hhi;
+  const zhviGrowth = met.zhvi_growth_1yr;
+
+  const demandBullets = [];
+  if (popGrowth != null && popGrowth > 0) {
+    demandBullets.push(`**Population Growth:** Expanding at **+${popGrowth.toFixed(1)}%**${migration != null && migration > 0 ? ` with a +${migration.toFixed(2)}% net migration tailwind` : ""} — generating sustained household formation pressure that precedes MPC demand.`);
+  } else if (popGrowth != null) {
+    demandBullets.push(`**Population Growth:** Flat-to-negative at **${popGrowth.toFixed(1)}%** — compresses the organic formation pipeline and raises the bar for catalyst-driven demand.`);
+  }
+  if (hhi != null) {
+    demandBullets.push(hhi >= 80000
+      ? `**Household Income:** Above-median at **$${(hhi / 1000).toFixed(0)}k** — supports attainable product pricing at MPC scale.`
+      : hhi >= 55000
+        ? `**Household Income:** **$${(hhi / 1000).toFixed(0)}k** — consistent with workforce-housing-targeted MPC product.`
+        : `**Household Income:** **$${(hhi / 1000).toFixed(0)}k** — constrains price ceiling; favors a value-oriented product mix.`);
+  }
+  if (empGrowth != null && empGrowth > 2) {
+    demandBullets.push(`**Employment Growth:** **+${empGrowth.toFixed(1)}%** YoY anchors incremental housing demand and reduces stabilization risk for first phases.`);
+  }
+  if (zhviGrowth != null) {
+    demandBullets.push(zhviGrowth > 0.04
+      ? `**Home Values:** Appreciating at **+${(zhviGrowth * 100).toFixed(1)}%** YoY — demand is outrunning local supply, a strong lead indicator for MPC absorption.`
+      : zhviGrowth > 0
+        ? `**Home Values:** Modest **+${(zhviGrowth * 100).toFixed(1)}%** HPA — stable but not overheated conditions preserve developer margin.`
+        : `**Home Values:** **${(zhviGrowth * 100).toFixed(1)}%** YoY — entry basis is favorable but demand validation is required.`);
+  }
+  if (demandBullets.length) {
+    lines.push("**Key Demand Drivers**");
+    demandBullets.forEach(b => lines.push(`• ${b}`));
+    lines.push("");
+  }
+
+  // Site conditions
+  const density = met.pop_density;
+  const landVal = met.farmland_value_acre;
+  const permits = met.permit_units_per_1k;
+  const fema = met.fema_risk_score;
+
+  const siteBullets = [];
+  if (density != null && density < 50) {
+    siteBullets.push(`**Density:** **${density.toFixed(0)}/mi²** confirms available greenfield land with minimal displacement of existing development.`);
+  } else if (density != null && density > 200) {
+    siteBullets.push(`**Density:** **${density.toFixed(0)}/mi²** is elevated for a greenfield strategy — may limit contiguous parcel availability at MPC scale.`);
+  }
+  if (landVal != null) {
+    siteBullets.push(landVal < 3000
+      ? `**Land Basis:** **$${(landVal / 1000).toFixed(1)}k/ac** farmland cost — among the most competitive in the universe, supporting developer margin and attainable pricing.`
+      : landVal < 8000
+        ? `**Land Basis:** **$${(landVal / 1000).toFixed(1)}k/ac** — within range for an MPC land-to-finished-lot conversion model.`
+        : `**Land Basis:** **$${(landVal / 1000).toFixed(1)}k/ac** — elevated; warrants careful pro forma sensitivity testing.`);
+  }
+  if (permits != null && permits > 5) {
+    siteBullets.push(`**Permit Activity:** **${permits.toFixed(1)} units/1k pop** — active pipeline de-risks entitlement assumptions for new MPC phases.`);
+  } else if (permits != null && permits < 2) {
+    siteBullets.push(`**Permit Activity:** **${permits.toFixed(1)} units/1k pop** — thin pipeline may indicate entitlement friction or constrained infrastructure; diligence warranted.`);
+  }
+  if (siteBullets.length) {
+    lines.push("**Site Conditions**");
+    siteBullets.forEach(b => lines.push(`• ${b}`));
+    lines.push("");
+  }
+
+  // Execution risks
+  const riskBullets = [];
+  if (weak.length) {
+    riskBullets.push(`**Underwriting Risks:** **${weak.join("** and **")}** weigh on the composite score and require deal-level mitigation.`);
+  }
+  if (fema != null && fema > 60) {
+    riskBullets.push(`**FEMA Risk:** Score of **${fema.toFixed(0)}/100** indicates above-average hazard exposure — infrastructure resilience and insurance underwriting should be assessed.`);
+  }
+  if (riskBullets.length) {
+    lines.push("**Execution Considerations**");
+    riskBullets.forEach(b => lines.push(`• ${b}`));
+  }
+
+  return lines.join("\n");
+};
+
+// Generates a renderDeepDive-compatible markdown string for an Engineered Markets county
+const _engineeredNarrative = (name, state, met, es, rank, total, profile) => {
+  if (!met || !es) return null;
+  const pct = Math.round((1 - rank / total) * 100);
+  const industryLabel = { manufacturing: "manufacturing", logistics: "logistics / distribution", tech: "technology / R&D", healthcare: "healthcare", mixed: "mixed-use" }[profile?.industry] || "industrial";
+  const wageTxt = profile?.wageLevel === "high" ? "professional-wage" : profile?.wageLevel === "low" ? "entry-level" : "moderate-wage";
+  const tierDesc = es.tier === "Prime Site" ? "a prime employer destination" :
+    es.tier === "Strong Site" ? "a strong site selection candidate" :
+    es.tier === "Viable Site" ? "a viable but competitive site" : "a conditional site requiring incentive support";
+
+  const strong = es.dims.filter(d => d.score >= 0.65).map(d => d.label);
+  const weak   = es.dims.filter(d => d.score < 0.38).map(d => d.label);
+
+  const lines = [];
+
+  // Opening
+  lines.push(`For a **${wageTxt} ${industryLabel}** employer, **${name}, ${state}** ranks **#${rank}** of ${total.toLocaleString()} screened counties — placing it in the **top ${100 - pct}th percentile** and qualifying as ${tierDesc} under the current employer profile.`);
+  if (strong.length) {
+    lines.push(`Site strength is led by **${strong.slice(0, 2).join("** and **")}**, the dimensions most critical to ${industryLabel} site selection success.`);
+  }
+  lines.push("");
+
+  // Workforce
+  const unemp = met.unemployment_rate;
+  const lfpr  = met.lfpr;
+  const totalEmp = met.total_employment;
+  const wfBullets = [];
+  if (unemp != null) {
+    wfBullets.push(unemp >= 6
+      ? `**Unemployment: ${unemp.toFixed(1)}%** — substantial available labor pool; positive for rapid workforce ramp-up without significant wage pressure.`
+      : unemp >= 4
+        ? `**Unemployment: ${unemp.toFixed(1)}%** — balanced labor market with accessible workforce at scale.`
+        : `**Unemployment: ${unemp.toFixed(1)}%** — tight conditions; above-market wage positioning or workforce pipeline partnerships will be required.`);
+  }
+  if (lfpr != null) {
+    wfBullets.push(lfpr >= 60
+      ? `**LFPR: ${lfpr.toFixed(1)}%** — high attachment rate signals a workforce-oriented community.`
+      : `**LFPR: ${lfpr.toFixed(1)}%** — below baseline; meaningful reserve population can be activated through employer-driven training programs.`);
+  }
+  if (totalEmp != null) {
+    wfBullets.push(totalEmp > 20000
+      ? `**Employment Base: ${(totalEmp / 1000).toFixed(0)}k jobs** — diversified labor market supporting amenity infrastructure for incoming workers.`
+      : `**Employment Base: ${(totalEmp / 1000).toFixed(0)}k jobs** — relatively small; a large employer would be transformative for the local economy.`);
+  }
+  if (wfBullets.length) {
+    lines.push("**Workforce Supply**");
+    wfBullets.forEach(b => lines.push(`• ${b}`));
+    lines.push("");
+  }
+
+  // Site
+  const landVal = met.farmland_value_acre;
+  const broadband = met.broadband_pct;
+  const metroDrive = met.drive_min_nearest_metro;
+  const empGrowth = met.emp_growth_pct;
+  const siteBullets = [];
+  if (landVal != null) {
+    siteBullets.push(landVal < 3000
+      ? `**Land Basis: $${(landVal / 1000).toFixed(1)}k/ac** — most competitive in the screened universe; meaningful cost advantage for greenfield industrial development.`
+      : landVal < 8000
+        ? `**Land Basis: $${(landVal / 1000).toFixed(1)}k/ac** — within range for an industrial park or campus development model.`
+        : `**Land Basis: $${(landVal / 1000).toFixed(1)}k/ac** — elevated; warrants careful per-square-foot developed cost sensitivity.`);
+  }
+  if (broadband != null) {
+    siteBullets.push(broadband >= 85
+      ? `**Broadband: ${broadband.toFixed(0)}%** — meets modern operational requirements for connected facilities.`
+      : `**Broadband: ${broadband.toFixed(0)}%** — below benchmark; may require provider investment or public subsidy as a condition of commitment.`);
+  }
+  if (metroDrive != null) {
+    siteBullets.push(metroDrive <= 45
+      ? `**Metro Access: ${metroDrive.toFixed(0)} min** — meaningful labor market depth without the land cost and congestion of the core.`
+      : metroDrive <= 90
+        ? `**Metro Access: ${metroDrive.toFixed(0)} min** — cost and scale advantages while remaining within commuting range for specialized talent.`
+        : `**Metro Access: ${metroDrive.toFixed(0)} min** — true exurban positioning; strong for commodity workforce but requires deliberate talent-access strategy for specialized roles.`);
+  }
+  if (empGrowth != null && empGrowth > 1) {
+    siteBullets.push(`**Employment Growth: +${empGrowth.toFixed(1)}%** YoY — local economy already in expansion mode, reducing first-mover risk for an incoming employer anchor.`);
+  }
+  if (siteBullets.length) {
+    lines.push("**Site Fundamentals**");
+    siteBullets.forEach(b => lines.push(`• ${b}`));
+    lines.push("");
+  }
+
+  // Absorption
+  const hhi = met.median_hhi;
+  const zhvi = met.zhvi_latest;
+  if (hhi && zhvi) {
+    const ratio = zhvi / hhi;
+    lines.push("**Residential Absorption**");
+    lines.push(`• **Home Value / Income Ratio: ${ratio.toFixed(1)}x** — ${ratio < 3.5 ? "exceptional affordability; workers can own near the worksite without wage concessions." : ratio < 5 ? "healthy affordability for the target wage band." : "stretched affordability; AP or employer housing assistance may be required to fully unlock the residential component."}`);
+    lines.push("");
+  }
+
+  // Risks
+  const riskBullets = [];
+  if (weak.length) {
+    riskBullets.push(`**Lowest-scoring dimensions:** **${weak.join("** and **")}** — primary risk factors under the current employer profile.`);
+  }
+  const fema = met.fema_risk_score;
+  if (fema != null && fema > 60) {
+    riskBullets.push(`**FEMA Risk: ${fema.toFixed(0)}/100** — factor into facility siting, insurance underwriting, and business continuity planning.`);
+  }
+  if (riskBullets.length) {
+    lines.push("**Execution Risks**");
+    riskBullets.forEach(b => lines.push(`• ${b}`));
+  }
+
+  return lines.join("\n");
+};
+
 const _downPaymentReachPct = (homeValue, downPct, hhi, years = 3, savingsRate = 0.10, sigma = 0.85) => {
   if (!homeValue || !hhi || downPct == null) return null;
   const target = homeValue * downPct;
@@ -2087,6 +2487,9 @@ const PATH_TO_TAB = {
   "/expansion-markets":    "opportunity",
   "/coordinated-markets":  "coordinated",
   "/scoring-model":        "model",
+  "/formation-markets":    "formation",
+  "/engineered-markets":   "engineered",
+  "/property-analysis":    "property",
 };
 const TAB_TO_PATH = {
   portfolio:    "/portfolio",
@@ -2095,6 +2498,9 @@ const TAB_TO_PATH = {
   opportunity:  "/expansion-markets",
   coordinated:  "/coordinated-markets",
   model:        "/scoring-model",
+  formation:    "/formation-markets",
+  engineered:   "/engineered-markets",
+  property:     "/property-analysis",
 };
 const tabFromPath = PATH_TO_TAB[window.location.pathname] ?? "portfolio";
 const _initParams = new URLSearchParams(window.location.search);
@@ -2141,6 +2547,32 @@ const Dashboard = () => {
   const [kalshiLoading, setKalshiLoading] = useState(false);
   const [kalshiRefreshKey, setKalshiRefreshKey] = useState(0);
   const [policyWatchData, setPolicyWatchData] = useState(null);
+
+  // Property Analysis
+  const [propAddress, setPropAddress]         = useState("");
+  const [propPrice, setPropPrice]             = useState("");
+  const [propResult, setPropResult]           = useState(null);
+  const [propLoading, setPropLoading]         = useState(false);
+  const [propError, setPropError]             = useState(null);
+  const [propApShare, setPropApShare]         = useState(0.25);
+  const [propBuyerDown, setPropBuyerDown]     = useState(0.05);
+  const [propSuggestions, setPropSuggestions] = useState([]);
+  const [propSugOpen, setPropSugOpen]         = useState(false);
+  const propSugSelectedRef = React.useRef(false);
+
+  // Formation Markets
+  const [formationSelectedFips, setFormationSelectedFips] = useState(null);
+  const [formationPage, setFormationPage] = useState(0);
+
+  // Engineered Markets
+  const [engineeredSelectedFips, setEngineeredSelectedFips] = useState(null);
+  const [engineeredPage, setEngineeredPage] = useState(0);
+  const [engineeredProfile, setEngineeredProfile] = useState({
+    industry: "manufacturing",   // manufacturing | logistics | tech | healthcare | mixed
+    workforceSize: 500,          // target headcount
+    wageLevel: "moderate",       // low | moderate | high
+    landPriority: true,          // whether low land cost is critical
+  });
 
   const GS_PAGE_SIZE = 10;
 
@@ -2324,10 +2756,10 @@ const Dashboard = () => {
       });
   }, [chartPane, kalshiRefreshKey]);
 
-  // Fetch Ground Score county data + places index from S3 when Activation or Expansion tab first opens
+  // Fetch Ground Score county data + places index from S3 when any market tab first opens
   const gsFetchedRef = React.useRef(false);
   React.useEffect(() => {
-    if (chartPane !== "neopoli" && chartPane !== "opportunity" && chartPane !== "coordinated") return;
+    if (chartPane !== "neopoli" && chartPane !== "opportunity" && chartPane !== "coordinated" && chartPane !== "formation" && chartPane !== "engineered" && chartPane !== "property") return;
     if (gsFetchedRef.current) return;
     gsFetchedRef.current = true;
     setGroundScoreLoading(true);
@@ -3554,6 +3986,137 @@ const Dashboard = () => {
   );
   const hSentimentTip = mkHTip((_l, v) => Math.round(v).toString());
 
+  // ── Tab navigation — hoisted so we can render it full-width outside the grid ──
+  const handleTab = (v) => {
+    setChartPane(v);
+    if (v === "neopoli") {
+      if (groundScoreData) {
+        setNeopoliMarket(groundScoreData.activation[0]?.fips || null);
+        setSelectedCity(groundScoreData.activation[0]?.metrics?.cs_city || null);
+      }
+    } else if (v === "opportunity") {
+      if (groundScoreData) {
+        setNeopoliMarket(groundScoreData.expansion[0]?.fips || null);
+        setSelectedCity(groundScoreData.expansion[0]?.metrics?.cs_city || null);
+      }
+    } else if (v === "formation" && groundScoreData && !formationSelectedFips) {
+      const scored = [...groundScoreData.activation]
+        .map(c => ({ fips: c.fips, score: _formationScore(c.metrics) }))
+        .filter(c => c.score)
+        .sort((a, b) => b.score.composite - a.score.composite);
+      if (scored[0]) setFormationSelectedFips(scored[0].fips);
+      setSelectedCity(null);
+    } else if (v === "engineered" && groundScoreData && !engineeredSelectedFips) {
+      const scored = [...groundScoreData.activation]
+        .map(c => ({ fips: c.fips, score: _engineeredScore(c.metrics, engineeredProfile) }))
+        .filter(c => c.score)
+        .sort((a, b) => b.score.composite - a.score.composite);
+      if (scored[0]) setEngineeredSelectedFips(scored[0].fips);
+      setSelectedCity(null);
+    } else {
+      setSelectedCity(null);
+    }
+  };
+
+  // ── Load Google Maps JS once ─────────────────────────────────────────────
+  React.useEffect(() => {
+    if (window.google?.maps) return; // already loaded
+    if (document.getElementById("gmap-script")) return; // already injected
+    const script = document.createElement("script");
+    script.id = "gmap-script";
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${process.env.REACT_APP_GOOGLE_PLACES}&libraries=places`;
+    script.async = true;
+    document.head.appendChild(script);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Close autocomplete when leaving the property tab ────────────────────
+  React.useEffect(() => {
+    if (chartPane !== "property") {
+      setPropSugOpen(false);
+      setPropSuggestions([]);
+    }
+  }, [chartPane]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Property Analysis: autocomplete suggestions (Google Places) ─────────
+  React.useEffect(() => {
+    if (chartPane !== "property") return;
+    if (propSugSelectedRef.current) { propSugSelectedRef.current = false; return; }
+    const q = propAddress.trim();
+    if (q.length < 3) { setPropSuggestions([]); setPropSugOpen(false); return; }
+    const svc = window.google?.maps?.places?.AutocompleteService
+      ? new window.google.maps.places.AutocompleteService()
+      : null;
+    if (!svc) return;
+    svc.getPlacePredictions(
+      { input: q, componentRestrictions: { country: "us" }, types: ["address"] },
+      (predictions, status) => {
+        if (status === window.google.maps.places.PlacesServiceStatus.OK && predictions?.length) {
+          setPropSuggestions(predictions);
+          setPropSugOpen(true);
+        } else {
+          setPropSuggestions([]);
+        }
+      }
+    );
+  }, [propAddress]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Property Analysis: geocode + enrich ──────────────────────────────────
+  const analyzeProperty = React.useCallback(async (overrideAddr) => {
+    const addr = (overrideAddr || propAddress).trim();
+    const price = parseFloat(propPrice.replace(/[^0-9.]/g, ""));
+    if (!addr || !price) { setPropError("Enter a full address and listing price."); return; }
+    setPropLoading(true);
+    setPropSugOpen(false);
+    setPropSuggestions([]);
+    setPropError(null);
+    setPropResult(null);
+    try {
+      // 1. Google Geocoder → lat/lon
+      const { lat, lon, displayAddr } = await new Promise((resolve, reject) => {
+        const geocoder = new window.google.maps.Geocoder();
+        geocoder.geocode({ address: addr, region: "us" }, (results, status) => {
+          if (status !== "OK" || !results?.[0]) {
+            reject(new Error("Address not found — try including city and state (e.g. 123 Main St, Austin TX)."));
+            return;
+          }
+          const r = results[0];
+          const loc = r.geometry.location;
+          resolve({
+            lat: typeof loc.lat === "function" ? loc.lat() : loc.lat,
+            lon: typeof loc.lng === "function" ? loc.lng() : loc.lng,
+            displayAddr: r.formatted_address,
+          });
+        });
+      });
+
+      // 2. FCC Census Block Finder → county FIPS (CORS-safe, no API key)
+      const fccRes = await fetch(`https://geo.fcc.gov/api/census/block/find?latitude=${lat}&longitude=${lon}&format=json`);
+      const fccData = await fccRes.json();
+      const fips      = fccData?.County?.FIPS || null;
+      const countyName = fccData?.County?.name || null;
+      const stateAbbr  = fccData?.State?.code  || null;
+
+      // 3. Look up county in Ground Score data (if loaded)
+      const gsd = groundScoreData;
+      const gsCounty = fips && gsd
+        ? (gsd.activation.find(c => c.fips === fips) || gsd.expansion?.find(c => c.fips === fips))
+        : null;
+
+      setPropResult({
+        address: displayAddr,
+        price,
+        lat, lon,
+        fips,
+        countyName: gsCounty?.name || countyName,
+        state: gsCounty?.state || stateAbbr,
+        gsCounty,
+      });
+    } catch (e) {
+      setPropError(e?.message || "Geocoding failed — check your connection and try again.");
+    }
+    setPropLoading(false);
+  }, [propAddress, propPrice, groundScoreData]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <Box
       sx={{
@@ -3706,9 +4269,503 @@ const Dashboard = () => {
         </Box>
       </Box>
 
+      {/* ── Full-width Tab Navigation ───────────────────────────────── */}
+      <Box sx={{ bgcolor: C.white, borderBottom: `1px solid ${C.border}`, px: 3 }}>
+        <Box sx={{ display: "flex", gap: 0, overflowX: "auto" }}>
+          {/* Portfolio group */}
+          {[
+            { v: "portfolio", label: "Portfolio" },
+            { v: "housing",   label: "Housing Market" },
+          ].map(({ v, label }, i) => (
+            <button
+              key={v}
+              className="nav-tab"
+              onClick={() => handleTab(v)}
+              style={{
+                padding: "10px 16px",
+                fontSize: 11,
+                fontWeight: 600,
+                fontFamily: "'Inter',sans-serif",
+                border: "none",
+                borderBottom: chartPane === v ? `2px solid ${C.navy}` : "2px solid transparent",
+                borderTop: "none",
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                background: "transparent",
+                color: chartPane === v ? C.navy : C.muted,
+                transition: "all 0.15s",
+                marginRight: i === 1 ? 16 : 0,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+          {/* Property Analysis tab */}
+          {[{ v: "property", label: "Property Analysis" }].map(({ v, label }) => (
+            <button
+              key={v}
+              className="nav-tab-orange"
+              onClick={() => handleTab(v)}
+              style={{
+                padding: "10px 16px",
+                fontSize: 11,
+                fontWeight: 600,
+                fontFamily: "'Inter',sans-serif",
+                border: "none",
+                borderBottom: chartPane === v ? `2px solid ${C.orange}` : "2px solid transparent",
+                borderTop: "none",
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                background: "transparent",
+                color: chartPane === v ? C.orange : C.muted,
+                transition: "all 0.15s",
+                marginRight: 16,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+          {/* Divider */}
+          <Box sx={{ width: 1, alignSelf: "stretch", bgcolor: C.border, mx: 1 }} />
+          {/* Market strategy tabs */}
+          {[
+            { v: "neopoli",     label: "Activation Markets" },
+            { v: "opportunity", label: "Expansion Markets" },
+            { v: "formation",   label: "Formation Markets" },
+            { v: "engineered",  label: "Engineered Markets" },
+            { v: "coordinated", label: "Coordinated Markets" },
+            { v: "model",       label: "Scoring Model" },
+          ].map(({ v, label }) => (
+            <button
+              key={v}
+              className="nav-tab"
+              onClick={() => handleTab(v)}
+              style={{
+                padding: "10px 16px",
+                fontSize: 11,
+                fontWeight: 600,
+                fontFamily: "'Inter',sans-serif",
+                border: "none",
+                borderBottom: chartPane === v ? `2px solid ${C.navy}` : "2px solid transparent",
+                borderTop: "none",
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                background: "transparent",
+                color: chartPane === v ? C.navy : C.muted,
+                transition: "all 0.15s",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </Box>
+      </Box>
+
       {/* ── Content ─────────────────────────────────────────────────── */}
       <Box sx={{ px: 3, py: 3 }}>
+
+        {/* ── Property Analysis Pane ───────────────────────────────── */}
+        {chartPane === "property" && (() => {
+          // Remaining balance after Y years on a 30yr fixed
+          const remainingBalance = (principal, annualRate, yearsPaid) => {
+            if (!principal || !annualRate) return principal;
+            const r = annualRate / 12;
+            const n = 30 * 12;
+            const p = yearsPaid * 12;
+            return principal * (Math.pow(1 + r, n) - Math.pow(1 + r, p)) / (Math.pow(1 + r, n) - 1);
+          };
+
+          const kalshiMtgRaw = kalshiData?.series?.KXMORTGAGERATE?.markets?.length > 0
+            ? (kalshiMedian(kalshiData.series.KXMORTGAGERATE.markets)?.value ?? null) : null;
+          const kalshiMtgPct = kalshiMtgRaw ?? 7.0;
+          const kalshiMtg    = kalshiMtgPct / 100;
+
+          const price    = parseFloat(propPrice.replace(/[^0-9.]/g, "")) || 0;
+          const result   = propResult;
+          const stdDP    = propBuyerDown;
+          const apContrib = price > 0 ? Math.max(0, 0.20 - stdDP) * price : 0;
+
+          // Standard card payment
+          const stdPI    = price > 0 ? _monthlyMortgage(price, stdDP, kalshiMtg) : null;
+          const stdPMI   = price > 0 ? _monthlyPMI(price, stdDP) : 0;
+          const stdTotal = stdPI != null ? stdPI + stdPMI : null;
+
+          // AP card: always 20% down, no PMI
+          const apPI     = price > 0 ? _monthlyMortgage(price, 0.20, kalshiMtg) : null;
+          const savings  = (stdTotal != null && apPI != null) ? stdTotal - apPI : null;
+
+          const hhi      = result?.gsCounty?.metrics?.median_hhi || null;
+          const stdDTI   = (price > 0 && hhi) ? _housingDTI(price, hhi, stdDP, kalshiMtg) : null;
+          const apDTI    = (price > 0 && hhi) ? _housingDTI(price, hhi, 0.20, kalshiMtg) : null;
+          const stdPool  = (price > 0 && hhi) ? _buyerPoolPct(price, hhi, stdDP, kalshiMtg) : null;
+          const apPool   = (price > 0 && hhi) ? _buyerPoolPct(price, hhi, 0.20, kalshiMtg) : null;
+          const lift     = (stdPool != null && apPool != null) ? apPool - stdPool : null;
+
+          return (
+            <Grid container spacing={2.5}>
+
+              {/* ── LEFT: Form ──────────────────────────────────────────── */}
+              <Grid item xs={12} md={4}>
+                <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1, overflow: "visible", height: "100%" }}>
+                  <CardContent sx={{ pb: "12px !important", overflow: "visible" }}>
+                    <SectionHeader title="Property Analysis" sub="Enter an address and listing price to generate a full mortgage &amp; market overview" />
+
+                    {/* Address */}
+                    <Box sx={{ mb: 2, position: "relative" }}>
+                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.5 }}>Property Address</Typography>
+                      <input
+                        value={propAddress}
+                        onChange={e => { setPropAddress(e.target.value); }}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") { setPropSugOpen(false); analyzeProperty(); }
+                          if (e.key === "Escape") setPropSugOpen(false);
+                        }}
+                        onFocus={() => propSuggestions.length > 0 && setPropSugOpen(true)}
+                        onBlur={() => setTimeout(() => setPropSugOpen(false), 150)}
+                        placeholder="344 Coinbow Drive, Richmond VA 23223"
+                        style={{ width: "100%", fontSize: 13, padding: "8px 12px", border: `1px solid ${C.border}`, borderRadius: 4, fontFamily: "'Inter',sans-serif", outline: "none", boxSizing: "border-box" }}
+                      />
+                      {propSugOpen && propSuggestions.length > 0 && (
+                        <Box sx={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 9999, bgcolor: C.white, border: `1px solid ${C.border}`, borderRadius: 1, boxShadow: "0 4px 16px rgba(0,0,0,0.12)", mt: 0.5, overflow: "hidden" }}>
+                          {propSuggestions.map((s, i) => {
+                            const main = s.structured_formatting?.main_text || s.description;
+                            const secondary = s.structured_formatting?.secondary_text || "";
+                            return (
+                              <Box
+                                key={s.place_id || i}
+                                onMouseDown={e => e.preventDefault()}
+                                onClick={() => {
+                                  propSugSelectedRef.current = true;
+                                  setPropAddress(s.description);
+                                  setPropSugOpen(false);
+                                  setPropSuggestions([]);
+                                }}
+                                sx={{ px: 1.5, py: 1, cursor: "pointer", borderBottom: i < propSuggestions.length - 1 ? `1px solid ${C.border}` : "none", "&:hover": { bgcolor: C.bg } }}
+                              >
+                                <Typography sx={{ fontSize: 12, fontWeight: 600, color: C.charcoal }}>{main}</Typography>
+                                {secondary && <Typography sx={{ fontSize: 10, color: C.muted }}>{secondary}</Typography>}
+                              </Box>
+                            );
+                          })}
+                        </Box>
+                      )}
+                    </Box>
+
+                    {/* Listing Price */}
+                    <Box sx={{ mb: 2 }}>
+                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.5 }}>Listing Price</Typography>
+                      <input
+                        value={propPrice}
+                        onChange={e => setPropPrice(e.target.value.replace(/[^0-9]/g, ""))}
+                        onBlur={e => {
+                          const raw = e.target.value.replace(/[^0-9]/g, "");
+                          setPropPrice(raw ? "$" + parseInt(raw, 10).toLocaleString() : "");
+                        }}
+                        onFocus={e => {
+                          const raw = e.target.value.replace(/[^0-9]/g, "");
+                          setPropPrice(raw || "");
+                        }}
+                        onKeyDown={e => e.key === "Enter" && analyzeProperty()}
+                        placeholder="$425,000"
+                        style={{ width: "100%", fontSize: 13, padding: "8px 12px", border: `1px solid ${C.border}`, borderRadius: 4, fontFamily: "'Inter',sans-serif", outline: "none", boxSizing: "border-box" }}
+                      />
+                    </Box>
+
+                    {/* Down Payment */}
+                    <Box sx={{ mb: 2 }}>
+                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.5 }}>Buyer Down Payment</Typography>
+                      <select
+                        value={propBuyerDown}
+                        onChange={e => setPropBuyerDown(parseFloat(e.target.value))}
+                        style={{ width: "100%", fontSize: 12, padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 4, fontFamily: "'Inter',sans-serif", background: C.white, cursor: "pointer" }}
+                      >
+                        <option value={0}>0%</option>
+                        <option value={0.035}>3.5%</option>
+                        <option value={0.05}>5%</option>
+                        <option value={0.10}>10%</option>
+                      </select>
+                    </Box>
+
+                    {/* Analyze */}
+                    <button
+                      onClick={() => analyzeProperty()}
+                      disabled={propLoading}
+                      style={{ width: "100%", padding: "10px 0", fontSize: 12, fontWeight: 700, color: C.white, background: C.navy, border: "none", borderRadius: 4, cursor: propLoading ? "default" : "pointer", fontFamily: "'Inter',sans-serif", opacity: propLoading ? 0.7 : 1 }}
+                    >
+                      {propLoading ? "Analyzing…" : "Analyze Property"}
+                    </button>
+                    {propError && (
+                      <Typography sx={{ fontSize: 11, color: "#e57373", mt: 1 }}>{propError}</Typography>
+                    )}
+                  </CardContent>
+                </Card>
+              </Grid>
+
+              {/* ── RIGHT: Output ───────────────────────────────────────── */}
+              <Grid item xs={12} md={8}>
+
+                {propLoading && (
+                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, py: 8 }}>
+                    <l-helix size="50" speed="2.5" color={C.navy}></l-helix>
+                    <Typography sx={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Geocoding address · Loading market data</Typography>
+                  </Box>
+                )}
+
+                {!propLoading && !result && (
+                  <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", minHeight: 200 }}>
+                    <Typography sx={{ fontSize: 12, color: C.muted, textAlign: "center" }}>Enter an address and listing price,<br />then click Analyze Property.</Typography>
+                  </Box>
+                )}
+
+                {result && !propLoading && (() => {
+                  const county  = result.gsCounty;
+                  const met     = county?.metrics || {};
+                  const hpa     = met.zhvi_growth_1yr ?? 0.03;
+                  const hpaOut  = county ? _hpaOutlook(met, kalshiMtgRaw) : null;
+
+                  return (
+                    <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+
+                      {/* Property header */}
+                      <Card elevation={0} sx={{ border: `1px solid ${C.navy}`, borderRadius: 1, overflow: "hidden" }}>
+                        <Box sx={{ background: C.navy, px: 2, py: 1.25 }}>
+                          <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.white, textTransform: "uppercase", letterSpacing: "0.09em" }}>Property Overview</Typography>
+                          <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.65)", mt: 0.25 }}>{result.address}</Typography>
+                        </Box>
+                        <CardContent sx={{ pb: "12px !important" }}>
+                          <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                            {[
+                              { label: "Listing Price", value: `$${price.toLocaleString()}`, accent: true },
+                              { label: "County", value: `${result.countyName}, ${result.state}` },
+                              { label: "AP Contribution", value: apContrib > 0 ? `$${Math.round(apContrib).toLocaleString()} (${((0.20 - stdDP) * 100 % 1 === 0 ? ((0.20 - stdDP) * 100).toFixed(0) : ((0.20 - stdDP) * 100).toFixed(1))}%)` : "Buyer ≥ 20%" },
+                              { label: "Buyer Down", value: `${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% · $${Math.round(stdDP * price).toLocaleString()}` },
+                              { label: "Mortgage Rate", value: `${kalshiMtgPct.toFixed(2)}% (Kalshi)` },
+                            ].map(({ label, value, accent }) => (
+                              <Box key={label} sx={{ flex: "1 1 130px", minWidth: 120, border: `1px solid ${accent ? C.navy + "44" : C.border}`, borderRadius: 1, p: 0.75, background: accent ? C.navy + "08" : "transparent" }}>
+                                <Typography sx={{ fontSize: 8, color: C.muted, fontWeight: 600 }}>{label}</Typography>
+                                <Typography sx={{ fontSize: 12, fontWeight: 700, color: accent ? C.navy : C.charcoal }}>{value}</Typography>
+                              </Box>
+                            ))}
+                          </Box>
+                        </CardContent>
+                      </Card>
+
+                      {/* Standard vs AP mortgage cards */}
+                      {stdTotal != null && apPI != null && (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            <SectionHeader
+                              title="Mortgage Comparison"
+                              sub={`${kalshiMtgPct.toFixed(2)}% rate (Kalshi) · 30-yr fixed · Standard: ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% down · AP: 20% down (buyer ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% + AP ${((0.20 - stdDP) * 100 % 1 === 0 ? ((0.20 - stdDP) * 100).toFixed(0) : ((0.20 - stdDP) * 100).toFixed(1))}%)`}
+                            />
+                            <Box sx={{ display: "flex", gap: 1.5, mb: 1.5, flexWrap: "wrap" }}>
+
+                              {/* Standard card */}
+                              <Box sx={{ flex: "1 1 140px", border: `1px solid ${C.border}`, borderRadius: 1, p: 1.5, background: C.bg }}>
+                                <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>Standard · {stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% Down</Typography>
+                                <Typography sx={{ fontSize: 26, fontWeight: 800, color: C.charcoal, lineHeight: 1 }}>${Math.round(stdTotal).toLocaleString()}</Typography>
+                                <Typography sx={{ fontSize: 10, color: C.muted, mb: 0.75 }}>P&amp;I: ${Math.round(stdPI).toLocaleString()}{stdPMI > 0 ? ` + $${Math.round(stdPMI).toLocaleString()} PMI` : ""}</Typography>
+                                {stdDTI != null && (
+                                  <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5, mb: 0.25 }}>
+                                    <Typography sx={{ fontSize: 13, fontWeight: 800, color: C.charcoal }}>{stdDTI.toFixed(1)}%</Typography>
+                                    <Typography sx={{ fontSize: 10, color: C.muted }}>housing DTI</Typography>
+                                  </Box>
+                                )}
+                                {stdPool != null && <Typography sx={{ fontSize: 10, color: C.muted, mb: 0.75 }}>~{stdPool.toFixed(0)}% of households qualify</Typography>}
+                                {hhi && (() => {
+                                  const req = Math.round((stdTotal / 0.43) * 12);
+                                  const delta = req - hhi;
+                                  const absFmt = `$${Math.round(Math.abs(delta) / 1000).toLocaleString()}k`;
+                                  return (
+                                    <Box sx={{ pt: 0.75, borderTop: `1px solid ${C.border}` }}>
+                                      <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.25 }}>Min. Income to Qualify</Typography>
+                                      <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.charcoal, lineHeight: 1, mb: 0.25 }}>${Math.round(req / 1000).toLocaleString()}k/yr</Typography>
+                                      <Typography sx={{ fontSize: 10, fontWeight: 700, color: delta > 0 ? "#ef4444" : C.green }}>{delta > 0 ? `▲ ${absFmt} above median` : `▼ ${absFmt} below median`}</Typography>
+                                    </Box>
+                                  );
+                                })()}
+                              </Box>
+
+                              {/* AP card */}
+                              <Box sx={{ flex: "1 1 140px", border: `2px solid ${C.navy}`, borderRadius: 1, p: 1.5, background: C.navy, position: "relative" }}>
+                                <Typography sx={{ fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,0.6)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>American Pledge · 20% Down</Typography>
+                                <Box sx={{ display: "flex", alignItems: "flex-start", gap: "16px", mb: 0 }}>
+                                  <Typography sx={{ fontSize: 26, fontWeight: 800, color: C.white, lineHeight: 1 }}>${Math.round(apPI).toLocaleString()}</Typography>
+                                  {savings != null && savings > 0 && (
+                                    <Box sx={{ pt: 0.25 }}>
+                                      <Typography sx={{ fontSize: 10, color: "#7ee8a2", fontWeight: 700, lineHeight: 1.3 }}>saves ${Math.round(savings).toLocaleString()}/mo</Typography>
+                                      {stdPMI > 0 && <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.45)", lineHeight: 1.3 }}>${Math.round(stdPMI).toLocaleString()} PMI eliminated</Typography>}
+                                    </Box>
+                                  )}
+                                </Box>
+                                <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.6)", mb: 0.75 }}>P&amp;I: ${Math.round(apPI).toLocaleString()} · no PMI</Typography>
+                                {apDTI != null && (
+                                  <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5, mb: 0.25 }}>
+                                    <Typography sx={{ fontSize: 13, fontWeight: 800, color: C.white }}>{apDTI.toFixed(1)}%</Typography>
+                                    <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.6)" }}>housing DTI</Typography>
+                                  </Box>
+                                )}
+                                {apPool != null && <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.75)", mb: 0.75 }}>~{apPool.toFixed(0)}% of households qualify</Typography>}
+                                {hhi && (() => {
+                                  const req = Math.round((apPI / 0.43) * 12);
+                                  const delta = req - hhi;
+                                  const absFmt = `$${Math.round(Math.abs(delta) / 1000).toLocaleString()}k`;
+                                  return (
+                                    <Box sx={{ pt: 0.75, borderTop: `1px solid rgba(255,255,255,0.15)` }}>
+                                      <Typography sx={{ fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.25 }}>Min. Income to Qualify</Typography>
+                                      <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.white, lineHeight: 1, mb: 0.25 }}>${Math.round(req / 1000).toLocaleString()}k/yr</Typography>
+                                      <Typography sx={{ fontSize: 10, fontWeight: 700, color: delta > 0 ? "#fca5a5" : "#7ee8a2" }}>{delta > 0 ? `▲ ${absFmt} above median` : `▼ ${absFmt} below median`}</Typography>
+                                    </Box>
+                                  );
+                                })()}
+                                <img src="/ampledge_white.svg" alt="" style={{ position: "absolute", bottom: 8, right: 8, width: 18, height: 18, objectFit: "contain", opacity: 1 }} />
+                              </Box>
+
+                              {/* Affordability Lift */}
+                              {lift != null && (
+                                <Box sx={{ flex: "1 1 100px", border: `1px solid ${C.greenLight}55`, borderRadius: 1, p: 1.5, background: C.greenLight + "12", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                                  <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.5 }}>Buyer Affordability Lift</Typography>
+                                  <Typography sx={{ fontSize: 34, fontWeight: 800, color: C.greenLight, lineHeight: 1 }}>+{lift.toFixed(0)}</Typography>
+                                  <Typography sx={{ fontSize: 10, color: C.green, fontWeight: 600, mb: 0.5 }}>pts buyer pool</Typography>
+                                  <Typography sx={{ fontSize: 9, color: C.muted }}>AP contribution: ${Math.round(apContrib).toLocaleString()}</Typography>
+                                </Box>
+                              )}
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      )}
+
+                      {/* Market context */}
+                      {county ? (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1, overflow: "hidden" }}>
+                          <Box sx={{ background: C.navy + "cc", px: 2, py: 1.25 }}>
+                            <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.white, textTransform: "uppercase", letterSpacing: "0.09em" }}>
+                              {county.name}, {county.state} · Market Context
+                            </Typography>
+                            <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.65)", mt: 0.25 }}>
+                              Ground Score rank #{county.rank} · {county.tier?.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
+                            </Typography>
+                          </Box>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            {hpaOut && (
+                              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mb: 1.5 }}>
+                                <Box sx={{ flex: "0 0 110px", border: `1px solid ${hpaOut.color}44`, borderRadius: 1, p: 1, background: hpaOut.color + "18" }}>
+                                  <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
+                                  <Typography sx={{ fontSize: 16, fontWeight: 700, color: hpaOut.color, lineHeight: 1.1 }}>
+                                    {hpaOut.hpaLow >= 0 ? "+" : ""}{hpaOut.hpaLow}–{hpaOut.hpaHigh}%
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 9, color: C.muted }}>avg HPA/yr</Typography>
+                                  <Typography sx={{ fontSize: 9, fontWeight: 700, color: hpaOut.color, mt: 0.25 }}>{hpaOut.label}</Typography>
+                                </Box>
+                                {hpaOut.drivers.map(d => {
+                                  const dc = d.score >= 0.6 ? C.greenLight : d.score >= 0.35 ? "#f0a500" : "#e57373";
+                                  return (
+                                    <Box key={d.key} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d" }}>
+                                      <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                      <Typography sx={{ fontSize: 13, fontWeight: 700, color: dc, lineHeight: 1.1 }}>{d.value ?? "—"}</Typography>
+                                      <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.25, lineHeight: 1.4 }}>{d.detail}</Typography>
+                                    </Box>
+                                  );
+                                })}
+                              </Box>
+                            )}
+                            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                              {[
+                                { label: "Ground Score", value: county.composite?.toFixed(1) },
+                                { label: "1yr HPA", value: met.zhvi_growth_1yr != null ? `${(met.zhvi_growth_1yr * 100).toFixed(1)}%` : "—" },
+                                { label: "Median HHI", value: met.median_hhi ? `$${(met.median_hhi / 1000).toFixed(0)}k` : "—" },
+                                { label: "Unemployment", value: met.unemployment_rate != null ? `${met.unemployment_rate.toFixed(1)}%` : "—" },
+                                { label: "Pop Growth", value: met.pop_growth_pct != null ? `${met.pop_growth_pct >= 0 ? "+" : ""}${met.pop_growth_pct.toFixed(1)}%` : "—" },
+                                { label: "Median Home Val.", value: met.zhvi_latest ? `$${(met.zhvi_latest / 1000).toFixed(0)}k` : "—" },
+                              ].map(({ label, value }) => (
+                                <Box key={label} sx={{ flex: "1 1 90px", minWidth: 80, border: `1px solid ${C.border}`, borderRadius: 1, p: 0.75 }}>
+                                  <Typography sx={{ fontSize: 8, color: C.muted, fontWeight: 600 }}>{label}</Typography>
+                                  <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.charcoal }}>{value ?? "—"}</Typography>
+                                </Box>
+                              ))}
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      ) : (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent>
+                            <Typography sx={{ fontSize: 11, color: C.muted, p: 1 }}>
+                              County FIPS <strong>{result.fips}</strong> ({result.countyName}, {result.state}) was geocoded successfully but is not in the Ground Score universe. Load a market tab first to populate the dataset.
+                            </Typography>
+                          </CardContent>
+                        </Card>
+                      )}
+
+                      {/* Equity projections */}
+                      {price > 0 && (
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            <SectionHeader
+                              title="Equity &amp; Investment Outcome"
+                              sub={`${(hpa * 100).toFixed(1)}% avg annual HPA${county ? ` (${county.name})` : ""} · Standard: ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% down · AP: 20% down · AP appreciation share via fund schedule`}
+                            />
+                            <Box sx={{ overflowX: "auto" }}>
+                              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                <thead>
+                                  <tr>
+                                    {["Hold Period", "Est. Value", "Appreciation", `Std ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% Bal.`, `Std Equity`, "AP Bal.", "AP Cap Rate", "AP Share Due", "Buyer Net Equity", "Advantage"].map(h => (
+                                      <th key={h} style={{ padding: "6px 10px", textAlign: "left", fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {[1, 2, 3, 5, 10].map((yr, i) => {
+                                    const futureVal    = price * Math.pow(1 + hpa, yr);
+                                    const appreciation = futureVal - price;
+                                    const cap          = CAP_SCHEDULE[yr - 1] ?? 1.0;
+                                    const apShareAmt   = appreciation * cap;
+
+                                    const stdLoan  = price * (1 - stdDP);
+                                    const stdBal   = remainingBalance(stdLoan, kalshiMtg, yr);
+                                    const stdEquity = futureVal - stdBal;
+
+                                    const apLoan   = price * 0.80;
+                                    const apBal    = remainingBalance(apLoan, kalshiMtg, yr);
+                                    const apNetEq  = (futureVal - apBal) - apShareAmt;
+                                    const equityAdv = apNetEq - stdEquity;
+                                    return (
+                                      <tr key={yr} style={{ background: i % 2 === 1 ? C.bg : C.white }}>
+                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: C.navy }}>{yr} yr</td>
+                                        <td style={{ padding: "8px 10px", color: C.charcoal }}>${Math.round(futureVal).toLocaleString()}</td>
+                                        <td style={{ padding: "8px 10px", color: C.greenLight, fontWeight: 600 }}>+${Math.round(appreciation).toLocaleString()}</td>
+                                        <td style={{ padding: "8px 10px", color: C.muted }}>${Math.round(stdBal).toLocaleString()}</td>
+                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: C.charcoal }}>${Math.round(stdEquity).toLocaleString()}</td>
+                                        <td style={{ padding: "8px 10px", color: C.muted }}>${Math.round(apBal).toLocaleString()}</td>
+                                        <td style={{ padding: "8px 10px", color: C.muted }}>{(cap * 100).toFixed(1)}%</td>
+                                        <td style={{ padding: "8px 10px", color: C.orange }}>-${Math.round(apShareAmt).toLocaleString()}</td>
+                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: C.orange }}>${Math.round(apNetEq).toLocaleString()}</td>
+                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: equityAdv >= 0 ? C.greenLight : "#e57373" }}>
+                                          {equityAdv >= 0 ? "+" : ""}${Math.round(equityAdv).toLocaleString()}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </Box>
+                            <Typography sx={{ fontSize: 9, color: C.muted, mt: 1.5, lineHeight: 1.7 }}>
+                              AP Cap Rate follows the fund's schedule (yr 1: 46.7% → yr 5+: 100%). AP Net Equity = home value minus loan balance minus AP's appreciation share. Advantage = buyer's AP equity minus Standard equity at sale.
+                            </Typography>
+                          </CardContent>
+                        </Card>
+                      )}
+
+                    </Box>
+                  );
+                })()}
+
+              </Grid>
+            </Grid>
+          );
+        })()}
+
         {/* ── Main Two-Column Section ──────────────────────────────── */}
+        {chartPane !== "property" && (<>
         <Grid container spacing={2.5} sx={{ mb: 3, alignItems: "stretch" }}>
           {/* Left 50%: Slider + Case-Shiller chart stacked */}
           <Grid item xs={12} md={6}>
@@ -3740,54 +4797,41 @@ const Dashboard = () => {
                     flexBasis: { md: "50%" },
                   }}
                 >
-                  {(chartPane === "neopoli" || chartPane === "opportunity") && (
-                    <Card
-                      elevation={0}
-                      sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}
-                    >
+                  {(chartPane === "neopoli" || chartPane === "opportunity" || chartPane === "formation" || chartPane === "engineered") && (() => {
+                    const tabLabel = chartPane === "neopoli" ? "Activation Markets" : chartPane === "opportunity" ? "Expansion Markets" : chartPane === "formation" ? "Formation Markets" : "Engineered Markets";
+                    const accentColor = chartPane === "neopoli" ? C.navy : chartPane === "opportunity" ? C.greenLight : chartPane === "formation" ? C.blue : C.orange;
+                    const thesisMeta = {
+                      neopoli:     { entry: "Distressed basis", demand: "Catalyst event · Federal awards", ap: "Buyer pool expansion", hold: "3–5 years" },
+                      opportunity: { entry: "Greenfield MPC", demand: "Metro adjacency · HHI", ap: "Down payment program", hold: "5–7 years" },
+                      formation:   { entry: "Greenfield land assembly", demand: "In-migration · Pop growth", ap: "MPC buyer engine", hold: "7–10 years" },
+                      engineered:  { entry: "Pre-announcement land", demand: "Employer workforce", ap: "Workforce housing engine", hold: "10–15 years" },
+                    }[chartPane];
+                    return (
+                    <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                       <Box
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          px: 2,
-                          py: 1.25,
-                          borderBottom: showTabOverview
-                            ? `1px solid ${C.border}`
-                            : "none",
-                          cursor: "pointer",
-                        }}
+                        sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 2, py: 1.25, borderBottom: showTabOverview ? `1px solid ${C.border}` : "none", cursor: "pointer" }}
                         onClick={() => setShowTabOverview((v) => !v)}
                       >
-                        <Typography
-                          sx={{
-                            fontSize: 10,
-                            fontWeight: 800,
-                            color: C.navy,
-                            textTransform: "uppercase",
-                            letterSpacing: "0.09em",
-                          }}
-                        >
-                          Ground Score Market Intelligence ·{" "}
-                          {chartPane === "neopoli"
-                            ? "Activation Markets"
-                            : "Expansion Markets"}
+                        <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.09em" }}>
+                          Ground Score Market Intelligence · {tabLabel}
                         </Typography>
-                        <span
-                          style={{
-                            fontSize: 12,
-                            fontWeight: 600,
-                            color: C.navy,
-                            userSelect: "none",
-                            border: `1px solid ${C.navy}`,
-                            borderRadius: 4,
-                            background: "#dce4ec",
-                            padding: "3px 10px",
-                            cursor: "pointer",
-                          }}
-                        >
+                        <span style={{ fontSize: 12, fontWeight: 600, color: C.navy, userSelect: "none", border: `1px solid ${C.navy}`, borderRadius: 4, background: "#dce4ec", padding: "3px 10px", cursor: "pointer" }}>
                           {showTabOverview ? "HIDE" : "EXPAND"}
                         </span>
+                      </Box>
+                      {/* Collapsed: always show thesis quick-stats */}
+                      <Box sx={{ px: 2, py: 1, display: "flex", gap: 1, flexWrap: "wrap", borderBottom: showTabOverview ? `1px solid ${C.border}` : "none" }}>
+                        {[
+                          { label: "Entry Strategy", val: thesisMeta.entry },
+                          { label: "Demand Driver", val: thesisMeta.demand },
+                          { label: "AP Role", val: thesisMeta.ap },
+                          { label: "Target Hold", val: thesisMeta.hold },
+                        ].map(({ label, val }) => (
+                          <Box key={label} sx={{ flex: "1 1 100px", minWidth: 95, border: `1px solid ${accentColor}22`, borderRadius: 1, px: 1, py: 0.6, background: accentColor + "08" }}>
+                            <Typography sx={{ fontSize: 8, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</Typography>
+                            <Typography sx={{ fontSize: 10, fontWeight: 700, color: accentColor, mt: 0.2, lineHeight: 1.3 }}>{val}</Typography>
+                          </Box>
+                        ))}
                       </Box>
                       {showTabOverview && (
                         <CardContent sx={{ pb: "12px !important" }}>
@@ -3798,19 +4842,19 @@ const Dashboard = () => {
                                 Ground Score Market Intelligence
                               </Typography>
                               <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
-                                Ground Score Market Intelligence is location-intelligence based on market Ground Scores for identifying where capital deployment will generate the most durable, long-term returns. It uses deterministic scoring across economic, demographic, infrastructure, and market-readiness dimensions to surface markets that the broader investment community has not yet priced correctly — either because they are overlooked, misunderstood, or simply too early. Two complementary strategies operate within the platform, each targeting a different type of market inefficiency and a different investment product.
+                                Ground Score Market Intelligence is location-intelligence based on market Ground Scores for identifying where capital deployment will generate the most durable, long-term returns. It uses deterministic scoring across economic, demographic, infrastructure, and market-readiness dimensions to surface markets that the broader investment community has not yet priced correctly — either because they are overlooked, misunderstood, or simply too early. Four complementary strategies operate within the platform, each targeting a different type of market opportunity and a different investment product.
                               </Typography>
                             </Box>
                             {/* Strategy detail */}
                             <Box sx={{ pt: 1.5, borderTop: `1px solid ${C.border}` }}>
-                              <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.09em", mb: 0.75 }}>
-                                {chartPane === "neopoli" ? "Activation Markets" : "Expansion Markets"}
+                              <Typography sx={{ fontSize: 10, fontWeight: 800, color: accentColor, textTransform: "uppercase", letterSpacing: "0.09em", mb: 0.75 }}>
+                                {tabLabel}
                               </Typography>
                               {chartPane === "neopoli" && (
                                 <>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
-                                    Distressed secondary and tertiary markets are systematically mispriced. When a low cost basis, measurable economic distress, and a credible activation catalyst converge — a major employer commitment, federal infrastructure award, or large-scale institutional investment — capital deployed ahead of that activation captures the re-rating before the broader market prices it in.
+                                    Target distressed secondary and tertiary markets ahead of catalyst events. Entry cost is low by design — economic dislocation creates acquisition basis. When the catalyst fires (employer anchor, federal infrastructure award, OZ deployment), appreciation accrues to early-positioned capital. American Pledge's 20% down payment program expands the qualified buyer pool in markets where affordability is the primary barrier, accelerating exit.
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
@@ -3822,7 +4866,7 @@ const Dashboard = () => {
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>Dimensions —</span>
-                                    Each market is evaluated across 12 fixed dimensions — covering cost, distress, demographic and labor momentum, business activity, catalysts, anchor institutions, infrastructure, logistics, governance, risk, and regulatory friction — sourced from the U.S. Census Bureau, Bureau of Labor Statistics, DOE, and other official public sources. The goal is not to find the cheapest place but to find where <span style={{ fontStyle: "italic", color: C.charcoal }}>low cost, distress, momentum, and executability align</span>. A higher composite score means stronger convergence of those conditions; green tiers represent viable candidates worth advancing, gray indicates insufficient evidence for near-term prioritization.
+                                    {" "}Each market is evaluated across 12 fixed dimensions — covering cost, distress, demographic and labor momentum, business activity, catalysts, anchor institutions, infrastructure, logistics, governance, risk, and regulatory friction. The goal is not to find the cheapest place but to find where <span style={{ fontStyle: "italic", color: C.charcoal }}>low cost, distress, momentum, and executability align</span>.
                                   </Typography>
                                 </>
                               )}
@@ -3830,7 +4874,7 @@ const Dashboard = () => {
                                 <>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
-                                    High-growth metro fringe markets consistently underbuild relative to confirmed household demand. A master-planned community positioned ahead of the next expansion wave — with the right metro proximity, school district, and lifestyle offering — captures premium pricing and rapid absorption that established infill markets cannot match.
+                                    Target metro-fringe counties with strong household income, land availability, and proximity to major employment centers. These markets are primed for master-planned community development where American Pledge's down payment program is the decisive lever: converting a large pool of qualified-income households into first-time buyers.
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
@@ -3842,7 +4886,47 @@ const Dashboard = () => {
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>Dimensions —</span>
-                                    Each market is evaluated across 12 fixed dimensions — covering metro adjacency, population and migration momentum, land availability, household income, employment base, school district quality, housing demand pressure, infrastructure capacity, permitting climate, natural amenity, risk resilience, and tax environment — sourced from the U.S. Census Bureau, BLS, Zillow, NCES, FEMA National Risk Index, and local market estimates. The goal is not to find the fastest-growing place but to find where <span style={{ fontStyle: "italic", color: C.charcoal }}>confirmed demand, affordable land, and a favorable development environment align</span> before competing supply arrives. The current 15 markets are Activation Markets candidates — all are expected to score poorly here, validating thesis separation. Dedicated Expansion candidates will be added as data is sourced.
+                                    {" "}Each market is evaluated across 12 fixed dimensions — covering metro adjacency, population and migration momentum, land availability, household income, employment base, school district quality, housing demand pressure, infrastructure capacity, permitting climate, natural amenity, risk resilience, and tax environment. The goal is not to find the fastest-growing place but to find where <span style={{ fontStyle: "italic", color: C.charcoal }}>confirmed demand, affordable land, and a favorable development environment align</span> before competing supply arrives.
+                                  </Typography>
+                                </>
+                              )}
+                              {chartPane === "formation" && (
+                                <>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
+                                    Identify greenfield corridors where demographic momentum, low land cost, and development-ready infrastructure converge — before institutional capital arrives. Formation markets are growth corridors at early inflection where a master-planned community with the American Pledge program creates the demand ecosystem from the ground up.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
+                                    Counties where population is growing, people are arriving from other markets, land is affordable, permits are moving, and employment is expanding — but no large community builder has yet committed land. The window before supply catches up.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Investment strategy — </span>
+                                    Assemble raw land in advance of the growth wave. Develop a master-planned community targeting the in-migrant demographic. American Pledge provides the buyer engine — converting new workforce arrivals into homeowners and driving community fill velocity.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Scoring model —</span>
+                                    {" "}5 dimensions computed client-side: Demographic Momentum (pop growth + net migration, 30%), Greenfield Potential (low density + affordable land, 25%), Development Velocity (permit activity, 20%), Employment Growth (15%), Buyer Quality (HHI + HPA, 10%).
+                                  </Typography>
+                                </>
+                              )}
+                              {chartPane === "engineered" && (
+                                <>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
+                                    Employer-first site acquisition ahead of public announcement. When the family office brings an employer anchor to a market, it creates a designed demand ecosystem: the employer generates the workforce, American Pledge converts that workforce into buyers, and the adjacent MPC captures the housing demand. This is not market selection — it is market creation.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
+                                    Sites that score on available workforce, affordable land, and infrastructure readiness — but have not yet seen the employer announcement that would activate demand. The value is captured between site acquisition and public announcement.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Investment strategy — </span>
+                                    Acquire land around the future employer site before the announcement. Build the workforce housing community in parallel with employer construction. AP program converts the arriving workforce into buyers at scale, generating absorption velocity no speculative development could match.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Scoring model —</span>
+                                    {" "}5 dimensions, weights adjustable via employer profile: Available Workforce (30%), Land & Dev Cost (15–25% depending on land priority setting), Infrastructure (20%), Growth Momentum (15%), AP Absorption (10%).
                                   </Typography>
                                 </>
                               )}
@@ -3851,7 +4935,8 @@ const Dashboard = () => {
                         </CardContent>
                       )}
                     </Card>
-                  )}
+                    );
+                  })()}
 
                   {chartPane !== "model" && chartPane !== "coordinated" && (
                     <Card
@@ -5346,6 +6431,340 @@ const Dashboard = () => {
                           {groundScoreData.expansion.length.toLocaleString()}
                           -county universe).
                         </Typography>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Ground Score County Map — Formation */}
+                  {chartPane === "formation" && (
+                    <Box sx={{ display: "flex", gap: 2, alignItems: "stretch" }}>
+                      <Card
+                        elevation={0}
+                        sx={{ border: `1px solid ${C.border}`, borderRadius: 1, flex: "0 0 58%" }}
+                      >
+                        <CardContent sx={{ pb: "12px !important" }}>
+                          <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", mb: 1 }}>
+                            <SectionHeader
+                              title="Ground Score Yield Map"
+                              sub="All 3,100+ US counties · Formation scoring"
+                            />
+                            <SearchBox
+                              groundScoreData={groundScoreData}
+                              placesIndex={placesIndex}
+                              onSelectCounty={(fips) => {
+                                setFormationSelectedFips(fips);
+                                const centroid = countyCentroidRef.current[fips];
+                                if (centroid) setMapCenter(centroid);
+                              }}
+                              onSelectCity={(item) => {
+                                setFormationSelectedFips(item.county_fips);
+                                const centroid = countyCentroidRef.current[item.county_fips];
+                                if (centroid) setMapCenter(centroid);
+                              }}
+                            />
+                          </Box>
+                          <CountyMap
+                            counties={groundScoreData?.activation}
+                            selectedFips={formationSelectedFips}
+                            thesis="activation"
+                            zoom={mapZoom}
+                            center={mapCenter}
+                            onCentroidReady={(cmap) => { countyCentroidRef.current = cmap; }}
+                            onSelect={(fips) => { setFormationSelectedFips(fips); }}
+                          />
+                        </CardContent>
+                      </Card>
+                      <Card
+                        elevation={0}
+                        sx={{ border: `1px solid ${C.border}`, borderRadius: 1, flex: "1 1 42%", display: "flex", flexDirection: "column" }}
+                      >
+                        <CardContent sx={{ pb: "12px !important", display: "flex", flexDirection: "column", flex: 1 }}>
+                          {groundScoreData && (() => {
+                            const selFips = formationSelectedFips || groundScoreData.activation[0]?.fips;
+                            const county = groundScoreData.activation.find(c => c.fips === selFips) || groundScoreData.activation[0];
+                            const fs = county ? _formationScore(county.metrics) : null;
+                            return (
+                              <>
+                                <SectionHeader
+                                  title={county ? `${county.name}, ${county.state} · Score Breakdown` : "Score Breakdown"}
+                                  sub="Formation dimension weights"
+                                />
+                                {fs ? (
+                                  <Box sx={{ mt: 1, display: "flex", flexDirection: "column", gap: 1 }}>
+                                    {fs.dims.map((d) => (
+                                      <Box key={d.label}>
+                                        <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                                          <Typography sx={{ fontSize: 10, color: C.muted, fontWeight: 600 }}>{d.label}</Typography>
+                                          <Typography sx={{ fontSize: 10, color: C.navy, fontWeight: 700 }}>{Math.round(d.score * 100)}</Typography>
+                                        </Box>
+                                        <Box sx={{ height: 5, bgcolor: C.border, borderRadius: 1 }}>
+                                          <Box sx={{ height: "100%", width: `${Math.round(d.score * 100)}%`, bgcolor: C.blue, borderRadius: 1 }} />
+                                        </Box>
+                                        <Typography sx={{ fontSize: 9, color: C.muted, mt: 0.25 }}>{d.weight * 100}% weight</Typography>
+                                      </Box>
+                                    ))}
+                                    <Box sx={{ mt: 1, pt: 1, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                      <Typography sx={{ fontSize: 11, color: C.muted, fontWeight: 600 }}>Composite</Typography>
+                                      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                        <Box sx={{ px: 1, py: 0.25, borderRadius: 1, bgcolor: fs.tierColor + "22", border: `1px solid ${fs.tierColor}` }}>
+                                          <Typography sx={{ fontSize: 9, color: fs.tierColor, fontWeight: 700, textTransform: "uppercase" }}>{fs.tier}</Typography>
+                                        </Box>
+                                        <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.navy }}>{Math.round(fs.composite)}</Typography>
+                                      </Box>
+                                    </Box>
+                                  </Box>
+                                ) : (
+                                  <Box sx={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                    <Typography sx={{ fontSize: 11, color: C.muted }}>Select a county to view its score breakdown</Typography>
+                                  </Box>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </CardContent>
+                      </Card>
+                    </Box>
+                  )}
+
+                  {/* Ground Score Market Rankings — Formation */}
+                  {chartPane === "formation" && (
+                    <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                      <CardContent sx={{ pb: "12px !important" }}>
+                        <SectionHeader
+                          title="Ground Score Rankings"
+                          sub={groundScoreData
+                            ? `Formation Dimensions · ${groundScoreData.activation.length.toLocaleString()} counties scored · click a county to load its profile`
+                            : "Formation Dimensions scoring · loading..."}
+                        />
+                        {groundScoreLoading && (
+                          <Typography sx={{ fontSize: 12, color: C.muted, py: 2, textAlign: "center" }}>Loading county data…</Typography>
+                        )}
+                        {groundScoreData && (() => {
+                          const allCounties = [...groundScoreData.activation]
+                            .map(c => { const fs = _formationScore(c.metrics); return fs ? { ...c, formationScore: fs } : null; })
+                            .filter(Boolean)
+                            .sort((a, b) => b.formationScore.composite - a.formationScore.composite);
+                          const FORM_PAGE = GS_PAGE_SIZE;
+                          const totalPages = Math.ceil(allCounties.length / FORM_PAGE);
+                          const page = Math.min(formationPage, totalPages - 1);
+                          const slice = allCounties.slice(page * FORM_PAGE, (page + 1) * FORM_PAGE);
+                          return (
+                            <>
+                              <Box sx={{ overflowX: "auto" }}>
+                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                  <thead>
+                                    <tr>
+                                      {["#", "County", "State", "Ground Score", "Tier", "HPA Outlook"].map(h => (
+                                        <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {slice.map((m, i) => {
+                                      const fs = m.formationScore;
+                                      const isSelected = formationSelectedFips === m.fips;
+                                      const kalshiMtg = kalshiData?.series?.KXMORTGAGERATE?.markets?.length > 0
+                                        ? kalshiMedian(kalshiData.series.KXMORTGAGERATE.markets)?.value ?? null : null;
+                                      const hpaOut = _hpaOutlook(m.metrics, kalshiMtg);
+                                      return (
+                                        <tr key={m.fips} onClick={() => setFormationSelectedFips(m.fips)} style={{ cursor: "pointer", background: isSelected ? C.navy : i % 2 === 0 ? "transparent" : C.bg }}>
+                                          <td style={{ padding: "7px 10px", fontSize: 11, fontWeight: 700, color: isSelected ? C.white : C.muted }}>{page * FORM_PAGE + i + 1}</td>
+                                          <td style={{ padding: "7px 10px", fontSize: 12, fontWeight: 700, color: isSelected ? C.white : C.charcoal }}>{m.name}</td>
+                                          <td style={{ padding: "7px 10px", fontSize: 11, color: isSelected ? "rgba(255,255,255,0.7)" : C.muted }}>{m.state}</td>
+                                          <td style={{ padding: "7px 10px", fontSize: 13, fontWeight: 800, color: isSelected ? C.white : fs.tierColor }}>{fs.composite.toFixed(0)}</td>
+                                          <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                            <span style={{ fontSize: 10, fontWeight: 700, color: isSelected ? C.navy : fs.tierColor, background: isSelected ? C.white : fs.tierColor + "1a", border: `1px solid ${isSelected ? C.white : fs.tierColor + "55"}`, borderRadius: 4, padding: "2px 7px" }}>
+                                              {fs.tier}
+                                            </span>
+                                          </td>
+                                          <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                            {hpaOut ? (
+                                              <span style={{ fontSize: 10, fontWeight: 700, color: isSelected ? C.navy : hpaOut.color, background: isSelected ? C.white : hpaOut.color + "1a", border: `1px solid ${isSelected ? C.white : hpaOut.color + "55"}`, borderRadius: 4, padding: "2px 7px" }}>
+                                                {hpaOut.label}
+                                              </span>
+                                            ) : <span style={{ fontSize: 10, color: C.muted }}>—</span>}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </Box>
+                              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1, pt: 0.75, borderTop: `1px solid ${C.border}` }}>
+                                <button onClick={() => setFormationPage(p => Math.max(0, p - 1))} disabled={page === 0} style={{ fontSize: 10, padding: "3px 10px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>← Prev</button>
+                                <Typography sx={{ fontSize: 9, color: C.muted }}>Page {page + 1} / {totalPages}</Typography>
+                                <button onClick={() => setFormationPage(p => Math.min(totalPages - 1, p + 1))} disabled={page === totalPages - 1} style={{ fontSize: 10, padding: "3px 10px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: C.muted, cursor: page === totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>Next →</button>
+                              </Box>
+                            </>
+                          );
+                        })()}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Ground Score County Map — Engineered */}
+                  {chartPane === "engineered" && (
+                    <Box sx={{ display: "flex", gap: 2, alignItems: "stretch" }}>
+                      <Card
+                        elevation={0}
+                        sx={{ border: `1px solid ${C.border}`, borderRadius: 1, flex: "0 0 58%" }}
+                      >
+                        <CardContent sx={{ pb: "12px !important" }}>
+                          <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", mb: 1 }}>
+                            <SectionHeader
+                              title="Ground Score Yield Map"
+                              sub="All 3,100+ US counties · Engineered scoring"
+                            />
+                            <SearchBox
+                              groundScoreData={groundScoreData}
+                              placesIndex={placesIndex}
+                              onSelectCounty={(fips) => {
+                                setEngineeredSelectedFips(fips);
+                                const centroid = countyCentroidRef.current[fips];
+                                if (centroid) setMapCenter(centroid);
+                              }}
+                              onSelectCity={(item) => {
+                                setEngineeredSelectedFips(item.county_fips);
+                                const centroid = countyCentroidRef.current[item.county_fips];
+                                if (centroid) setMapCenter(centroid);
+                              }}
+                            />
+                          </Box>
+                          <CountyMap
+                            counties={groundScoreData?.activation}
+                            selectedFips={engineeredSelectedFips}
+                            thesis="activation"
+                            zoom={mapZoom}
+                            center={mapCenter}
+                            onCentroidReady={(cmap) => { countyCentroidRef.current = cmap; }}
+                            onSelect={(fips) => { setEngineeredSelectedFips(fips); }}
+                          />
+                        </CardContent>
+                      </Card>
+                      <Card
+                        elevation={0}
+                        sx={{ border: `1px solid ${C.border}`, borderRadius: 1, flex: "1 1 42%", display: "flex", flexDirection: "column" }}
+                      >
+                        <CardContent sx={{ pb: "12px !important", display: "flex", flexDirection: "column", flex: 1 }}>
+                          {groundScoreData && (() => {
+                            const selFips = engineeredSelectedFips || groundScoreData.activation[0]?.fips;
+                            const county = groundScoreData.activation.find(c => c.fips === selFips) || groundScoreData.activation[0];
+                            const es = county ? _engineeredScore(county.metrics, engineeredProfile) : null;
+                            return (
+                              <>
+                                <SectionHeader
+                                  title={county ? `${county.name}, ${county.state} · Score Breakdown` : "Score Breakdown"}
+                                  sub="Engineered dimension weights"
+                                />
+                                {es ? (
+                                  <Box sx={{ mt: 1, display: "flex", flexDirection: "column", gap: 1 }}>
+                                    {es.dims.map((d) => (
+                                      <Box key={d.label}>
+                                        <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                                          <Typography sx={{ fontSize: 10, color: C.muted, fontWeight: 600 }}>{d.label}</Typography>
+                                          <Typography sx={{ fontSize: 10, color: C.orange, fontWeight: 700 }}>{Math.round(d.score * 100)}</Typography>
+                                        </Box>
+                                        <Box sx={{ height: 5, bgcolor: C.border, borderRadius: 1 }}>
+                                          <Box sx={{ height: "100%", width: `${Math.round(d.score * 100)}%`, bgcolor: C.orange, borderRadius: 1 }} />
+                                        </Box>
+                                        <Typography sx={{ fontSize: 9, color: C.muted, mt: 0.25 }}>{Math.round(d.weight * 100)}% weight</Typography>
+                                      </Box>
+                                    ))}
+                                    <Box sx={{ mt: 1, pt: 1, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                      <Typography sx={{ fontSize: 11, color: C.muted, fontWeight: 600 }}>Composite</Typography>
+                                      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                        <Box sx={{ px: 1, py: 0.25, borderRadius: 1, bgcolor: es.tierColor + "22", border: `1px solid ${es.tierColor}` }}>
+                                          <Typography sx={{ fontSize: 9, color: es.tierColor, fontWeight: 700, textTransform: "uppercase" }}>{es.tier}</Typography>
+                                        </Box>
+                                        <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.navy }}>{Math.round(es.composite)}</Typography>
+                                      </Box>
+                                    </Box>
+                                  </Box>
+                                ) : (
+                                  <Box sx={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                    <Typography sx={{ fontSize: 11, color: C.muted }}>Select a county to view its score breakdown</Typography>
+                                  </Box>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </CardContent>
+                      </Card>
+                    </Box>
+                  )}
+
+                  {/* Ground Score Market Rankings — Engineered */}
+                  {chartPane === "engineered" && (
+                    <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                      <CardContent sx={{ pb: "12px !important" }}>
+                        <SectionHeader
+                          title="Ground Score Rankings"
+                          sub={groundScoreData
+                            ? `Engineered Site Optimizer · ${groundScoreData.activation.length.toLocaleString()} counties scored · click a county to load its profile`
+                            : "Engineered site scoring · loading..."}
+                        />
+                        {groundScoreLoading && (
+                          <Typography sx={{ fontSize: 12, color: C.muted, py: 2, textAlign: "center" }}>Loading county data…</Typography>
+                        )}
+                        {groundScoreData && (() => {
+                          const allCounties = [...groundScoreData.activation]
+                            .map(c => { const es = _engineeredScore(c.metrics, engineeredProfile); return es ? { ...c, engineeredScore: es } : null; })
+                            .filter(Boolean)
+                            .sort((a, b) => b.engineeredScore.composite - a.engineeredScore.composite);
+                          const ENG_PAGE = GS_PAGE_SIZE;
+                          const totalPages = Math.ceil(allCounties.length / ENG_PAGE);
+                          const page = Math.min(engineeredPage, totalPages - 1);
+                          const slice = allCounties.slice(page * ENG_PAGE, (page + 1) * ENG_PAGE);
+                          return (
+                            <>
+                              <Box sx={{ overflowX: "auto" }}>
+                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                  <thead>
+                                    <tr>
+                                      {["#", "County", "State", "Ground Score", "Tier", "HPA Outlook"].map(h => (
+                                        <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {slice.map((m, i) => {
+                                      const es = m.engineeredScore;
+                                      const isSelected = engineeredSelectedFips === m.fips;
+                                      const kalshiMtg = kalshiData?.series?.KXMORTGAGERATE?.markets?.length > 0
+                                        ? kalshiMedian(kalshiData.series.KXMORTGAGERATE.markets)?.value ?? null : null;
+                                      const hpaOut = _hpaOutlook(m.metrics, kalshiMtg);
+                                      return (
+                                        <tr key={m.fips} onClick={() => setEngineeredSelectedFips(m.fips)} style={{ cursor: "pointer", background: isSelected ? C.navy : i % 2 === 0 ? "transparent" : C.bg }}>
+                                          <td style={{ padding: "7px 10px", fontSize: 11, fontWeight: 700, color: isSelected ? C.white : C.muted }}>{page * ENG_PAGE + i + 1}</td>
+                                          <td style={{ padding: "7px 10px", fontSize: 12, fontWeight: 700, color: isSelected ? C.white : C.charcoal }}>{m.name}</td>
+                                          <td style={{ padding: "7px 10px", fontSize: 11, color: isSelected ? "rgba(255,255,255,0.7)" : C.muted }}>{m.state}</td>
+                                          <td style={{ padding: "7px 10px", fontSize: 13, fontWeight: 800, color: isSelected ? C.white : es.tierColor }}>{es.composite.toFixed(0)}</td>
+                                          <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                            <span style={{ fontSize: 10, fontWeight: 700, color: isSelected ? C.navy : es.tierColor, background: isSelected ? C.white : es.tierColor + "1a", border: `1px solid ${isSelected ? C.white : es.tierColor + "55"}`, borderRadius: 4, padding: "2px 7px" }}>
+                                              {es.tier}
+                                            </span>
+                                          </td>
+                                          <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                            {hpaOut ? (
+                                              <span style={{ fontSize: 10, fontWeight: 700, color: isSelected ? C.navy : hpaOut.color, background: isSelected ? C.white : hpaOut.color + "1a", border: `1px solid ${isSelected ? C.white : hpaOut.color + "55"}`, borderRadius: 4, padding: "2px 7px" }}>
+                                                {hpaOut.label}
+                                              </span>
+                                            ) : <span style={{ fontSize: 10, color: C.muted }}>—</span>}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </Box>
+                              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1, pt: 0.75, borderTop: `1px solid ${C.border}` }}>
+                                <button onClick={() => setEngineeredPage(p => Math.max(0, p - 1))} disabled={page === 0} style={{ fontSize: 10, padding: "3px 10px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>← Prev</button>
+                                <Typography sx={{ fontSize: 9, color: C.muted }}>Page {page + 1} / {totalPages}</Typography>
+                                <button onClick={() => setEngineeredPage(p => Math.min(totalPages - 1, p + 1))} disabled={page === totalPages - 1} style={{ fontSize: 10, padding: "3px 10px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: C.muted, cursor: page === totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>Next →</button>
+                              </Box>
+                            </>
+                          );
+                        })()}
                       </CardContent>
                     </Card>
                   )}
@@ -7200,70 +8619,6 @@ const Dashboard = () => {
                     gap: 2,
                   }}
                 >
-                  {/* Pane toggle */}
-                  {(() => {
-                    const handleTab = (v) => {
-                      setChartPane(v);
-                      if (v === "neopoli") {
-                        if (groundScoreData) {
-                          setNeopoliMarket(
-                            groundScoreData.activation[0]?.fips || null,
-                          );
-                          setSelectedCity(
-                            groundScoreData.activation[0]?.metrics?.cs_city ||
-                              null,
-                          );
-                        }
-                      } else if (v === "opportunity") {
-                        if (groundScoreData) {
-                          setNeopoliMarket(
-                            groundScoreData.expansion[0]?.fips || null,
-                          );
-                          setSelectedCity(
-                            groundScoreData.expansion[0]?.metrics?.cs_city ||
-                              null,
-                          );
-                        }
-                      } else {
-                        setSelectedCity(null);
-                      }
-                    };
-                    const TabBtn = ({ v, label, first }) => (
-                      <button
-                        onClick={() => handleTab(v)}
-                        style={{
-                          padding: "5px 12px",
-                          fontSize: 11,
-                          fontWeight: 600,
-                          fontFamily: "'Inter',sans-serif",
-                          border: "none",
-                          cursor: "pointer",
-                          whiteSpace: "nowrap",
-                          background: chartPane === v ? C.navy : C.white,
-                          color: chartPane === v ? C.white : C.muted,
-                          transition: "all 0.15s",
-                          borderLeft: first ? "none" : `1px solid ${C.border}`,
-                        }}
-                      >
-                        {label}
-                      </button>
-                    );
-                    return (
-                      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <Box sx={{ display: "flex", borderRadius: 1, overflow: "hidden", border: `1px solid ${C.border}` }}>
-                          <TabBtn v="portfolio" label="Portfolio" first />
-                          <TabBtn v="housing"   label="Housing Market" />
-                        </Box>
-                        <Box sx={{ display: "flex", borderRadius: 1, overflow: "hidden", border: `1px solid ${C.border}` }}>
-                          <TabBtn v="neopoli"     label="Activation Markets" first />
-                          <TabBtn v="opportunity" label="Expansion Markets" />
-                          <TabBtn v="coordinated" label="Coordinated Markets" />
-                          <TabBtn v="model"       label="Scoring Model" />
-                        </Box>
-                      </Box>
-                    );
-                  })()}
-
                   {chartPane === "portfolio" && (
                     <Box
                       sx={{
@@ -12400,6 +13755,229 @@ const Dashboard = () => {
                     </Box>
                   )}
 
+                  {/* ── Formation Markets Pane (right: county detail only) ── */}
+                  {chartPane === "formation" && (() => {
+                    if (!groundScoreData) return groundScoreLoading ? (
+                      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, pt: 6 }}>
+                        <l-helix size="60" speed="2.5" color={C.navy}></l-helix>
+                        <Typography sx={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Loading Ground Score Intelligence</Typography>
+                      </Box>
+                    ) : null;
+                    const allCounties = [...groundScoreData.activation]
+                      .map(c => { const fs = _formationScore(c.metrics); return fs ? { ...c, formationScore: fs } : null; })
+                      .filter(Boolean).sort((a, b) => b.formationScore.composite - a.formationScore.composite);
+                    const selFips = formationSelectedFips || allCounties[0]?.fips || null;
+                    const selCounty = allCounties.find(c => c.fips === selFips) || allCounties[0];
+                    if (!selCounty) return null;
+                    const fs = selCounty.formationScore;
+                    const met = selCounty.metrics;
+                    const rank = allCounties.findIndex(c => c.fips === selFips) + 1;
+                    return (
+                      <Box sx={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+                        <Card elevation={0} sx={{ border: `1px solid ${C.blue}`, borderRadius: 1, overflow: "hidden" }}>
+                          <Box sx={{ background: C.blue, px: 2, py: 1.25, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 1 }}>
+                            <Box>
+                              <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.white, textTransform: "uppercase", letterSpacing: "0.09em" }}>
+                                {selCounty.name}, {selCounty.state} · Formation Profile
+                              </Typography>
+                              <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.6)", mt: 0.25 }}>
+                                rank #{rank} of {allCounties.length.toLocaleString()} · composite {fs.composite.toFixed(1)}
+                              </Typography>
+                            </Box>
+                            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, color: C.blue, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px" }}>{fs.tier}</span>
+                              {!deepDives[`formation:${selCounty.fips}`] && (
+                                <button
+                                  onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: fs.composite, rank, tier: fs.tier, population: selCounty.population, dims: Object.fromEntries(fs.dims.map(d => [d.id, d.score * 100])), metrics: met }, "formation")}
+                                  disabled={deepDiveLoading === `formation:${selCounty.fips}`}
+                                  style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap", fontFamily: "'Inter',sans-serif" }}
+                                >
+                                  {deepDiveLoading === `formation:${selCounty.fips}` ? "Generating…" : "Deep Dive"}
+                                </button>
+                              )}
+                            </Box>
+                          </Box>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mb: 1.5 }}>
+                              {fs.dims.map(d => {
+                                const dc = d.score >= 0.65 ? C.greenLight : d.score >= 0.38 ? "#f0a500" : "#e57373";
+                                return (
+                                  <Box key={d.id} sx={{ flex: "1 1 110px", minWidth: 100, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d" }}>
+                                    <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                    <Typography sx={{ fontSize: 14, fontWeight: 700, color: dc, lineHeight: 1.1 }}>{d.value ?? "—"}</Typography>
+                                    <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.25, lineHeight: 1.4 }}>{d.detail}</Typography>
+                                  </Box>
+                                );
+                              })}
+                            </Box>
+                            {(() => {
+                              const text = deepDives[`formation:${selCounty.fips}`] || _formationNarrative(selCounty.name, selCounty.state, met, fs, rank, allCounties.length);
+                              return text ? <Box sx={{ mb: 1.5 }}>{renderDeepDive(text)}</Box> : null;
+                            })()}
+                            <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.75 }}>Key Metrics</Typography>
+                            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                              {[
+                                { label: "Home Value", value: met?.zhvi_latest ? `$${(met.zhvi_latest / 1000).toFixed(0)}k` : "—" },
+                                { label: "Median HHI", value: met?.median_hhi ? `$${(met.median_hhi / 1000).toFixed(0)}k` : "—" },
+                                { label: "Unemployment", value: met?.unemployment_rate != null ? `${met.unemployment_rate.toFixed(1)}%` : "—" },
+                                { label: "Emp Growth", value: met?.emp_growth_pct != null ? `${met.emp_growth_pct >= 0 ? "+" : ""}${met.emp_growth_pct.toFixed(1)}%` : "—" },
+                                { label: "Pop Density", value: met?.pop_density != null ? `${met.pop_density.toFixed(0)}/mi²` : "—" },
+                                { label: "Land Value", value: met?.farmland_value_acre != null ? `$${(met.farmland_value_acre / 1000).toFixed(1)}k/ac` : "—" },
+                                { label: "Permits/1k", value: met?.permit_units_per_1k != null ? `${met.permit_units_per_1k.toFixed(1)}` : "—" },
+                                { label: "FEMA Risk", value: met?.fema_risk_score != null ? `${met.fema_risk_score.toFixed(0)}/100` : "—" },
+                              ].map(({ label, value }) => (
+                                <Box key={label} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${C.border}`, borderRadius: 1, p: 0.75 }}>
+                                  <Typography sx={{ fontSize: 8, color: C.muted, fontWeight: 600 }}>{label}</Typography>
+                                  <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.charcoal }}>{value}</Typography>
+                                </Box>
+                              ))}
+                            </Box>
+                          </CardContent>
+                        </Card>
+                      </Box>
+                    );
+                  })()}
+
+                  {/* ── Engineered Markets Pane (right: employer profile inputs + county detail) ── */}
+                  {chartPane === "engineered" && (() => {
+                    if (!groundScoreData) return groundScoreLoading ? (
+                      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, pt: 6 }}>
+                        <l-helix size="60" speed="2.5" color={C.navy}></l-helix>
+                        <Typography sx={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Loading Ground Score Intelligence</Typography>
+                      </Box>
+                    ) : null;
+                    const INDUSTRY_OPTS = [
+                      { v: "manufacturing", label: "Manufacturing" },
+                      { v: "logistics",     label: "Logistics / Distribution" },
+                      { v: "tech",          label: "Technology / R&D" },
+                      { v: "healthcare",    label: "Healthcare / Medical" },
+                      { v: "mixed",         label: "Mixed Use / Other" },
+                    ];
+                    const WAGE_OPTS = [
+                      { v: "low",      label: "Entry-level (<$45k)" },
+                      { v: "moderate", label: "Moderate ($45k–$80k)" },
+                      { v: "high",     label: "Professional (>$80k)" },
+                    ];
+                    const allCounties = [...groundScoreData.activation]
+                      .map(c => { const es = _engineeredScore(c.metrics, engineeredProfile); return es ? { ...c, engineeredScore: es } : null; })
+                      .filter(Boolean).sort((a, b) => b.engineeredScore.composite - a.engineeredScore.composite);
+                    const selFips = engineeredSelectedFips || allCounties[0]?.fips || null;
+                    const selCounty = allCounties.find(c => c.fips === selFips) || allCounties[0];
+                    return (
+                      <Box sx={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+                        {/* Employer Profile Inputs */}
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                          <CardContent sx={{ pb: "12px !important" }}>
+                            <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 1 }}>
+                              Employer Profile — Site Optimizer Inputs
+                            </Typography>
+                            <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", alignItems: "flex-start" }}>
+                              <Box sx={{ flex: "1 1 140px", minWidth: 130 }}>
+                                <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.5 }}>Employer Industry</Typography>
+                                <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+                                  {INDUSTRY_OPTS.map(({ v, label }) => (
+                                    <button key={v} onClick={() => setEngineeredProfile(p => ({ ...p, industry: v }))} style={{ fontSize: 10, fontWeight: 600, textAlign: "left", padding: "4px 10px", border: `1px solid ${engineeredProfile.industry === v ? C.orange : C.border}`, borderRadius: 4, background: engineeredProfile.industry === v ? C.orange + "18" : "transparent", color: engineeredProfile.industry === v ? C.orange : C.muted, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>{label}</button>
+                                  ))}
+                                </Box>
+                              </Box>
+                              <Box sx={{ flex: "1 1 140px", minWidth: 130 }}>
+                                <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.5 }}>Target Wage Level</Typography>
+                                <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+                                  {WAGE_OPTS.map(({ v, label }) => (
+                                    <button key={v} onClick={() => setEngineeredProfile(p => ({ ...p, wageLevel: v }))} style={{ fontSize: 10, fontWeight: 600, textAlign: "left", padding: "4px 10px", border: `1px solid ${engineeredProfile.wageLevel === v ? C.orange : C.border}`, borderRadius: 4, background: engineeredProfile.wageLevel === v ? C.orange + "18" : "transparent", color: engineeredProfile.wageLevel === v ? C.orange : C.muted, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>{label}</button>
+                                  ))}
+                                </Box>
+                              </Box>
+                              <Box sx={{ flex: "1 1 140px", minWidth: 130 }}>
+                                <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.5 }}>Land Cost Priority</Typography>
+                                <button onClick={() => setEngineeredProfile(p => ({ ...p, landPriority: !p.landPriority }))} style={{ fontSize: 10, fontWeight: 700, padding: "5px 14px", border: `1px solid ${engineeredProfile.landPriority ? C.orange : C.border}`, borderRadius: 4, background: engineeredProfile.landPriority ? C.orange + "18" : "transparent", color: engineeredProfile.landPriority ? C.orange : C.muted, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>
+                                  {engineeredProfile.landPriority ? "Critical (high weight)" : "Standard (base weight)"}
+                                </button>
+                                <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.75, mb: 0.5, fontWeight: 600 }}>Active Weights</Typography>
+                                {[["Available Workforce","30%"],["Land & Dev Cost", engineeredProfile.landPriority ? "25%" : "15%"],["Infrastructure","20%"],["Growth Momentum","15%"],["AP Absorption","10%"]].map(([dim, wt]) => (
+                                  <Box key={dim} sx={{ display: "flex", justifyContent: "space-between", mb: 0.2 }}>
+                                    <Typography sx={{ fontSize: 8, color: C.muted }}>{dim}</Typography>
+                                    <Typography sx={{ fontSize: 8, fontWeight: 700, color: C.charcoal }}>{wt}</Typography>
+                                  </Box>
+                                ))}
+                              </Box>
+                            </Box>
+                          </CardContent>
+                        </Card>
+                        {/* County Detail */}
+                        {selCounty && (() => {
+                          const es = selCounty.engineeredScore;
+                          const met = selCounty.metrics;
+                          const rank = allCounties.findIndex(c => c.fips === selFips) + 1;
+                          return (
+                            <Card elevation={0} sx={{ border: `1px solid ${C.orange}`, borderRadius: 1, overflow: "hidden" }}>
+                              <Box sx={{ background: C.orange, px: 2, py: 1.25, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 1 }}>
+                                <Box>
+                                  <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.white, textTransform: "uppercase", letterSpacing: "0.09em" }}>
+                                    {selCounty.name}, {selCounty.state} · Site Profile
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.7)", mt: 0.25 }}>
+                                    rank #{rank} of {allCounties.length.toLocaleString()} · composite {es.composite.toFixed(1)} · {INDUSTRY_OPTS.find(o => o.v === engineeredProfile.industry)?.label}
+                                  </Typography>
+                                </Box>
+                                <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                                  <span style={{ fontSize: 10, fontWeight: 700, color: C.orange, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px" }}>{es.tier}</span>
+                                  {!deepDives[`engineered:${selCounty.fips}`] && (
+                                    <button
+                                      onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: es.composite, rank, tier: es.tier, population: selCounty.population, dims: Object.fromEntries(es.dims.map(d => [d.id, d.score * 100])), metrics: met }, "engineered")}
+                                      disabled={deepDiveLoading === `engineered:${selCounty.fips}`}
+                                      style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap", fontFamily: "'Inter',sans-serif" }}
+                                    >
+                                      {deepDiveLoading === `engineered:${selCounty.fips}` ? "Generating…" : "Deep Dive"}
+                                    </button>
+                                  )}
+                                </Box>
+                              </Box>
+                              <CardContent sx={{ pb: "12px !important" }}>
+                                <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mb: 1.5 }}>
+                                  {es.dims.map(d => {
+                                    const dc = d.score >= 0.65 ? C.greenLight : d.score >= 0.38 ? "#f0a500" : "#e57373";
+                                    return (
+                                      <Box key={d.id} sx={{ flex: "1 1 110px", minWidth: 100, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d" }}>
+                                        <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                        <Typography sx={{ fontSize: 14, fontWeight: 700, color: dc, lineHeight: 1.1 }}>{d.value ?? "—"}</Typography>
+                                        <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.25, lineHeight: 1.4 }}>{d.detail}</Typography>
+                                      </Box>
+                                    );
+                                  })}
+                                </Box>
+                                {(() => {
+                                  const text = deepDives[`engineered:${selCounty.fips}`] || _engineeredNarrative(selCounty.name, selCounty.state, met, es, rank, allCounties.length, engineeredProfile);
+                                  return text ? <Box sx={{ mb: 1.5 }}>{renderDeepDive(text)}</Box> : null;
+                                })()}
+                                <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.75 }}>Site Intelligence</Typography>
+                                <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                                  {[
+                                    { label: "Unemployment", value: met?.unemployment_rate != null ? `${met.unemployment_rate.toFixed(1)}%` : "—" },
+                                    { label: "Labor Force", value: met?.lfpr != null ? `${met.lfpr.toFixed(1)}% LFPR` : "—" },
+                                    { label: "Total Jobs", value: met?.total_employment ? `${(met.total_employment / 1000).toFixed(0)}k` : "—" },
+                                    { label: "Land Value", value: met?.farmland_value_acre != null ? `$${(met.farmland_value_acre / 1000).toFixed(1)}k/ac` : "—" },
+                                    { label: "Pop Density", value: met?.pop_density != null ? `${met.pop_density.toFixed(0)}/mi²` : "—" },
+                                    { label: "Broadband", value: met?.broadband_pct != null ? `${met.broadband_pct.toFixed(0)}%` : "—" },
+                                    { label: "Metro Drive", value: met?.drive_min_nearest_metro != null ? `${met.drive_min_nearest_metro.toFixed(0)} min` : "—" },
+                                    { label: "Median Wage", value: met?.oes_median_wage ? `$${(met.oes_median_wage / 1000).toFixed(0)}k` : "—" },
+                                    { label: "Median HHI", value: met?.median_hhi ? `$${(met.median_hhi / 1000).toFixed(0)}k` : "—" },
+                                    { label: "Home Value", value: met?.zhvi_latest ? `$${(met.zhvi_latest / 1000).toFixed(0)}k` : "—" },
+                                  ].map(({ label, value }) => (
+                                    <Box key={label} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${C.border}`, borderRadius: 1, p: 0.75 }}>
+                                      <Typography sx={{ fontSize: 8, color: C.muted, fontWeight: 600 }}>{label}</Typography>
+                                      <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.charcoal }}>{value}</Typography>
+                                    </Box>
+                                  ))}
+                                </Box>
+                              </CardContent>
+                            </Card>
+                          );
+                        })()}
+                      </Box>
+                    );
+                  })()}
+
                   {/* ── Coordinated Markets Pane ── */}
                   {chartPane === "coordinated" && (
                     <Box sx={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
@@ -13696,9 +15274,7 @@ const Dashboard = () => {
             {/* end left flex column */}
           </Grid>
         </Grid>
-        {/* end main two-column section */}
 
-        {/* ── Historical Modeling Table — Portfolio tab only ──────── */}
         {chartPane === "portfolio" && (
           <Card
             elevation={0}
@@ -14336,6 +15912,8 @@ const Dashboard = () => {
             </CardContent>
           </Card>
         )}
+
+        </>)}
 
         {/* ── Footer ─────────────────────────────────────────────── */}
         <Box
