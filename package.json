@@ -10,6 +10,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^13.5.0",
+    "aws-amplify": "^6.16.4",
     "chart.js": "^4.5.1",
     "d3-interpolate": "^3.0.1",
     "d3-scale": "^4.0.2",
@@ -29,6 +30,7 @@
     "eject": "react-scripts eject",
     "s3-sync": "node scripts/deploy-s3.mjs",
     "invalidate": "node -e \"require('dotenv').config(); const d = process.env.DISTRIBUTION_ID; if (!d) { console.log('Skipping CloudFront invalidation'); process.exit(0); } console.log('Invalidating:', d); require('child_process').execSync(`aws cloudfront create-invalidation --distribution-id ${d} --paths \"/*\"`, { stdio: 'inherit' });\"",
+    "setup-cloudfront": "node scripts/setup-cloudfront-errors.mjs",
     "deploy": "npm run build && npm run s3-sync && npm run invalidate"
   },
   "eslintConfig": {

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { signOut } from "aws-amplify/auth";
 import { helix } from "ldrs";
 import {
   Grid,
@@ -148,6 +149,152 @@ const cumulative = (returns, seed = 10000) =>
 const fmtPct = (n, d = 1) => (n >= 0 ? "+" : "") + n.toFixed(d) + "%";
 const fmtUSD = (n) => "$" + Math.round(n).toLocaleString("en-US");
 const fmtSign = (n, d = 2) => (n >= 0 ? "+" : "") + n.toFixed(d) + "%";
+
+// ─── Affordability helpers ──────────────────────────────────────────────────
+const _monthlyMortgage = (homeValue, downPct, rate = 0.07, years = 30) => {
+  if (!homeValue || downPct == null) return null;
+  const loan = homeValue * (1 - downPct);
+  const r = rate / 12;
+  const n = years * 12;
+  return (loan * r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1);
+};
+const _monthlyPMI = (homeValue, downPct, pmiRate = 0.011) => {
+  if (!homeValue || downPct == null || downPct >= 0.2) return 0;
+  return (homeValue * (1 - downPct) * pmiRate) / 12;
+};
+const _totalMonthlyPayment = (homeValue, downPct, rate = 0.07, years = 30) => {
+  const pi = _monthlyMortgage(homeValue, downPct, rate, years);
+  const pmi = _monthlyPMI(homeValue, downPct);
+  return pi != null ? pi + pmi : null;
+};
+const _housingDTI = (homeValue, hhi, downPct, rate = 0.07, years = 30, dtiDenom = 12) => {
+  if (!homeValue || !hhi || downPct == null) return null;
+  const payment = _totalMonthlyPayment(homeValue, downPct, rate, years);
+  if (payment == null) return null;
+  return (payment / (hhi / dtiDenom)) * 100;
+};
+const _buyerPoolPct = (homeValue, hhi, downPct, rate = 0.07, years = 30, dtiThreshold = 0.43, sigma = 0.85) => {
+  if (!homeValue || !hhi || downPct == null) return null;
+  const payment = _totalMonthlyPayment(homeValue, downPct, rate, years);
+  if (payment == null) return null;
+  const maxIncome = (payment / dtiThreshold) * 12;
+  const mu = Math.log(hhi) - (sigma * sigma) / 2;
+  const z = (Math.log(maxIncome) - mu) / sigma;
+  const erfApprox = (x) => {
+    const t = 1 / (1 + 0.3275911 * Math.abs(x));
+    const poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    const val = 1 - poly * Math.exp(-x * x);
+    return x >= 0 ? val : -val;
+  };
+  return (1 - (1 + erfApprox(z / Math.SQRT2)) / 2) * 100;
+};
+// ─── Per-Market HPA Outlook Model ────────────────────────────────────────────
+// Produces a composite directional price outlook from 5 signals:
+//   1. Price momentum   (zhvi_growth_1yr)               weight 25%
+//   2. Buyer pool depth (_buyerPoolPct at 20% down)      weight 25%
+//   3. Affordability gap (qualifying income / median HHI) weight 20%
+//   4. Demand momentum  (pop_growth_pct + lfpr proxy)    weight 20%
+//   5. Macro overlay    (Kalshi mortgage rate median)     weight 10%
+// Returns { label, color, score, hpaLow, hpaHigh, drivers }
+const _hpaOutlook = (met, kalshiMtgMedian = null) => {
+  if (!met) return null;
+  const scores = [];
+
+  // Signal 1: Price Momentum
+  if (met.zhvi_growth_1yr != null) {
+    const g = met.zhvi_growth_1yr;
+    const s = g > 0.08 ? 1.0 : g > 0.04 ? 0.75 : g > 0.01 ? 0.45 : g > 0 ? 0.2 : 0.0;
+    scores.push({ key: "momentum", weight: 0.25, score: s,
+      label: "Price Momentum",
+      value: `${g >= 0 ? "+" : ""}${(g * 100).toFixed(1)}%`,
+      detail: "1-yr ZHVI appreciation" });
+  }
+
+  // Signal 2: Buyer Pool Depth — uses 10% down (typical conventional buyer, ~NAR median)
+  if (met.zhvi_latest && met.median_hhi) {
+    const pool = _buyerPoolPct(met.zhvi_latest, met.median_hhi, 0.10);
+    if (pool != null) {
+      const s = pool > 40 ? 1.0 : pool > 30 ? 0.75 : pool > 20 ? 0.5 : pool > 12 ? 0.25 : 0.0;
+      scores.push({ key: "buyer_pool", weight: 0.25, score: s,
+        label: "Buyer Pool",
+        value: `${pool.toFixed(0)}%`,
+        detail: "of HH qualify (10% down, conv.)" });
+    }
+  }
+
+  // Signal 3: Affordability Gap — qualifying income vs. median HHI at 10% down
+  if (met.zhvi_latest && met.median_hhi) {
+    const payment = _totalMonthlyPayment(met.zhvi_latest, 0.10);
+    if (payment) {
+      const qualifyingIncome = (payment / 0.43) * 12;
+      const ratio = qualifyingIncome / met.median_hhi;
+      const s = ratio < 0.8 ? 1.0 : ratio < 1.0 ? 0.65 : ratio < 1.2 ? 0.35 : 0.05;
+      scores.push({ key: "affordability", weight: 0.20, score: s,
+        label: "Income Gap",
+        value: ratio < 1 ? `${((1 - ratio) * 100).toFixed(0)}% below` : `${((ratio - 1) * 100).toFixed(0)}% above`,
+        detail: ratio < 1 ? "median HHI exceeds qualifying income" : "qualifying income above median HHI" });
+    }
+  }
+
+  // Signal 4: Demand Momentum (pop growth + labor participation)
+  const popG = met.pop_growth_pct;
+  const lfpr = met.lfpr;
+  if (popG != null || lfpr != null) {
+    let s = 0.5;
+    if (popG != null) s = popG > 3 ? 1.0 : popG > 1 ? 0.7 : popG > 0 ? 0.4 : 0.1;
+    if (lfpr != null) s = (s + (lfpr > 65 ? 1.0 : lfpr > 58 ? 0.65 : 0.3)) / 2;
+    scores.push({ key: "demand_momentum", weight: 0.20, score: s,
+      label: "Demand Momentum",
+      value: popG != null ? `${popG >= 0 ? "+" : ""}${popG.toFixed(1)}%` : `${lfpr?.toFixed(1)}%`,
+      detail: [
+        popG != null ? "pop growth" : null,
+        lfpr != null ? `${lfpr.toFixed(1)}% LFPR` : null,
+      ].filter(Boolean).join(" · ") });
+  }
+
+  // Signal 5: Macro Overlay (Kalshi 30-yr mortgage rate consensus)
+  if (kalshiMtgMedian != null) {
+    const r = kalshiMtgMedian;
+    const s = r < 6.0 ? 1.0 : r < 6.5 ? 0.75 : r < 7.0 ? 0.45 : r < 7.5 ? 0.2 : 0.0;
+    scores.push({ key: "macro", weight: 0.10, score: s,
+      label: "Rate Outlook",
+      value: `${r.toFixed(2)}%`,
+      detail: "Kalshi 30-yr consensus" });
+  }
+
+  if (scores.length === 0) return null;
+
+  // Normalize weights to available signals
+  const totalWeight = scores.reduce((s, x) => s + x.weight, 0);
+  const composite = scores.reduce((s, x) => s + (x.score * x.weight), 0) / totalWeight;
+
+  let label, color, hpaLow, hpaHigh;
+  if (composite >= 0.72) { label = "Bullish"; color = "#27ae60"; hpaLow = 5; hpaHigh = 9; }
+  else if (composite >= 0.55) { label = "Mod. Bullish"; color = "#52c27a"; hpaLow = 3; hpaHigh = 6; }
+  else if (composite >= 0.38) { label = "Neutral"; color = "#7fa8cc"; hpaLow = 0; hpaHigh = 3; }
+  else if (composite >= 0.22) { label = "Cautious"; color = "#e8a04a"; hpaLow = -1; hpaHigh = 2; }
+  else { label = "Bearish"; color = "#e57373"; hpaLow = -4; hpaHigh = 0; }
+
+  return { label, color, score: composite, hpaLow, hpaHigh, drivers: scores };
+};
+
+const _downPaymentReachPct = (homeValue, downPct, hhi, years = 3, savingsRate = 0.10, sigma = 0.85) => {
+  if (!homeValue || !hhi || downPct == null) return null;
+  const target = homeValue * downPct;
+  const annualSavings = hhi * savingsRate;
+  const totalSavings = annualSavings * years;
+  if (totalSavings <= 0) return null;
+  const mu = Math.log(hhi) - (sigma * sigma) / 2;
+  const minIncome = target / (savingsRate * years);
+  const erfApprox = (x) => {
+    const t = 1 / (1 + 0.3275911 * Math.abs(x));
+    const poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    const val = 1 - poly * Math.exp(-x * x);
+    return x >= 0 ? val : -val;
+  };
+  const z = (Math.log(minIncome) - mu) / sigma;
+  return (1 - (1 + erfApprox(z / Math.SQRT2)) / 2) * 100;
+};
 
 // ─── Sub-components ────────────────────────────────────────────────────────
 const SectionHeader = ({ title, sub }) => (
@@ -1578,7 +1725,7 @@ const CITY_SCORE_COLOR = (composite) => {
 };
 
 const CityMap = React.memo(
-  ({ cities, countyFips, countyName, selectedCityFips, onCitySelect }) => {
+  ({ cities, countyFips, countyName, selectedCityFips, onCitySelect, showOZ, onToggleOZ, ozGeoData, ozLoading }) => {
     const [topoData, setTopoData] = React.useState(null);
     const [hoveredCity, setHoveredCity] = React.useState(null);
     const [userZoom, setUserZoom] = React.useState(1);
@@ -1607,7 +1754,7 @@ const CityMap = React.memo(
 
     // Zoom based on spread of cities
     const zoom = React.useMemo(() => {
-      if (validCities.length <= 1) return 28;
+      if (validCities.length <= 1) return 72;
       const lats = validCities.map((c) => c.lat);
       const lons = validCities.map((c) => c.lon);
       const extent = Math.max(
@@ -1615,7 +1762,7 @@ const CityMap = React.memo(
         Math.max(...lons) - Math.min(...lons),
         0.05,
       );
-      return Math.min(Math.max(1.8 / extent, 6), 50);
+      return Math.min(Math.max(4.6 / extent, 6), 80);
     }, [validCities]);
 
     const effectiveZoom = zoom * userZoom;
@@ -1714,6 +1861,20 @@ const CityMap = React.memo(
                       />
                     );
                   })
+                }
+              </Geographies>
+            )}
+
+            {showOZ && ozGeoData && (
+              <Geographies geography={ozGeoData}>
+                {({ geographies }) =>
+                  geographies.map((geo) => (
+                    <Geography key={geo.rsmKey} geography={geo}
+                      fill="#7c3aed22" stroke="#7c3aed"
+                      strokeWidth={1.2 / effectiveZoom}
+                      style={{ default:{outline:"none"}, hover:{outline:"none"}, pressed:{outline:"none"} }}
+                      pointerEvents="none" />
+                  ))
                 }
               </Geographies>
             )}
@@ -1855,6 +2016,26 @@ const CityMap = React.memo(
           </Box>
         )}
 
+        {/* OZ toggle */}
+        <Box sx={{ position: "absolute", bottom: 6, left: 8, zIndex: 10 }}>
+          <button
+            onClick={onToggleOZ}
+            style={{
+              fontSize: 9,
+              fontWeight: 700,
+              border: `1px solid ${showOZ ? "#7c3aed" : "#c4b5fd"}`,
+              borderRadius: 3,
+              background: showOZ ? "#7c3aed" : "#ede9fe",
+              color: showOZ ? "#fff" : "#7c3aed",
+              cursor: "pointer",
+              padding: "2px 6px",
+              fontFamily: "'Inter',sans-serif",
+            }}
+          >
+            {ozLoading ? "Loading…" : "OZ Tracts"}
+          </button>
+        </Box>
+
         {/* Legend */}
         <Box
           sx={{
@@ -1898,12 +2079,34 @@ const CityMap = React.memo(
   },
 );
 
+// ── Deep-link routing ────────────────────────────────────────────────────────
+const PATH_TO_TAB = {
+  "/portfolio":            "portfolio",
+  "/housing-market":       "housing",
+  "/activation-markets":   "neopoli",
+  "/expansion-markets":    "opportunity",
+  "/coordinated-markets":  "coordinated",
+  "/scoring-model":        "model",
+};
+const TAB_TO_PATH = {
+  portfolio:    "/portfolio",
+  housing:      "/housing-market",
+  neopoli:      "/activation-markets",
+  opportunity:  "/expansion-markets",
+  coordinated:  "/coordinated-markets",
+  model:        "/scoring-model",
+};
+const tabFromPath = PATH_TO_TAB[window.location.pathname] ?? "portfolio";
+const _initParams = new URLSearchParams(window.location.search);
+const countyFromPath = _initParams.get("county") || null;
+const cityFromPath   = _initParams.get("city")   || null;
+
 const Dashboard = () => {
   const [yearRange, setYearRange] = useState([2016, 2025]);
   const [selectedCity, setSelectedCity] = useState(null); // null = USA highlighted only
   const [tableView, setTableView] = useState("detail"); // 'detail' | 'benchmark' | 'housing'
-  const [chartPane, setChartPane] = useState("portfolio"); // 'portfolio' | 'housing' | 'neopoli' | 'opportunity' | 'coordinated'
-  const [neopoliMarket, setNeopoliMarket] = useState(null); // FIPS of selected county
+  const [chartPane, setChartPane] = useState(tabFromPath); // 'portfolio' | 'housing' | 'neopoli' | 'opportunity' | 'coordinated'
+  const [neopoliMarket, setNeopoliMarket] = useState(countyFromPath); // FIPS of selected county
   const [mapFips, setMapFips] = useState(null); // deferred — updates after scorecard/bars render
   const [groundScoreData, setGroundScoreData] = useState(null); // { generated, activation: [...], expansion: [...] }
   const [groundScoreLoading, setGroundScoreLoading] = useState(false);
@@ -1925,7 +2128,11 @@ const Dashboard = () => {
   const [coordSimDeltas, setCoordSimDeltas] = useState({}); // {dim_id: delta (-30 to +30)}
   const [showDimDesc, setShowDimDesc] = useState(false);
   const [showTabOverview, setShowTabOverview] = useState(false);
+  const [showAPCard, setShowAPCard] = useState(false);
   const [mapZoom, setMapZoom] = useState(1);
+  const [showOZ, setShowOZ] = useState(false);
+  const [ozGeoData, setOzGeoData] = useState(null);
+  const [ozLoading, setOzLoading] = useState(false);
   const [mapCenter, setMapCenter] = useState([-96, 38]);
   const [scenario, setScenario] = useState("base"); // 'bear' | 'base' | 'bull'
   const [ampledgeEnabled, setAmpledgeEnabled] = useState(false);
@@ -1938,7 +2145,7 @@ const Dashboard = () => {
   const GS_PAGE_SIZE = 10;
 
   const countyCentroidRef = React.useRef({});
-  const searchedCityRef = React.useRef(null); // set to place_fips when city selected via search
+  const searchedCityRef = React.useRef(cityFromPath); // set to place_fips when city selected via search (or from URL)
 
   const selectCityManually = React.useCallback((fips) => {
     setSelectedCityFips(fips);
@@ -2073,6 +2280,25 @@ const Dashboard = () => {
     [deepDives, deepDiveLoading],
   ); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Sync URL to active tab
+  React.useEffect(() => {
+    const path = TAB_TO_PATH[chartPane] ?? "/portfolio";
+    if (window.location.pathname !== path) {
+      window.history.replaceState(null, "", path + window.location.search);
+    }
+  }, [chartPane]);
+
+  // Sync county + city to URL query params
+  React.useEffect(() => {
+    const params = new URLSearchParams();
+    if (neopoliMarket) params.set("county", neopoliMarket);
+    if (selectedCityFips) params.set("city", selectedCityFips);
+    const qs = params.toString();
+    const newUrl = window.location.pathname + (qs ? `?${qs}` : "");
+    const curUrl = window.location.pathname + window.location.search;
+    if (curUrl !== newUrl) window.history.replaceState(null, "", newUrl);
+  }, [neopoliMarket, selectedCityFips]);
+
   // Fetch Kalshi prediction market data once when Housing Market tab is first visited
   const kalshiFetchedRef = React.useRef(false);
   React.useEffect(() => {
@@ -2132,11 +2358,10 @@ const Dashboard = () => {
         );
         setSelectedCity((prev) => {
           if (prev) return prev;
-          const top =
-            chartPane === "opportunity"
-              ? data.expansion[0]
-              : data.activation[0];
-          return top?.metrics?.cs_city || null;
+          const src = chartPane === "opportunity" ? data.expansion : data.activation;
+          // If a county was pre-selected from the URL, use its cs_city; otherwise fall back to top-ranked
+          const target = neopoliMarket ? src.find((c) => c.fips === neopoliMarket) : null;
+          return (target || src[0])?.metrics?.cs_city || null;
         });
       })
       .catch(() => {
@@ -2243,6 +2468,15 @@ const Dashboard = () => {
     setCoordSimDeltas({});
     setCoordDiveExpanded(false);
   }, [coordSelectedFips]);
+
+  React.useEffect(() => {
+    if (!showOZ || ozGeoData) return;
+    setOzLoading(true);
+    fetch("https://ampledge-fund.s3.amazonaws.com/oz_tracts.geojson")
+      .then((r) => r.json())
+      .then((data) => { setOzGeoData(data); setOzLoading(false); })
+      .catch(() => setOzLoading(false));
+  }, [showOZ]);
 
   const refreshKalshi = () => {
     kalshiFetchedRef.current = false;
@@ -3346,7 +3580,7 @@ const Dashboard = () => {
           <Box
             sx={{
               display: "flex",
-              alignItems: { xs: "flex-start", md: "baseline" },
+              alignItems: { xs: "flex-start", md: "center" },
               flexDirection: { xs: "column", md: "row" },
               gap: { xs: 0.25, md: 1 },
             }}
@@ -3448,6 +3682,27 @@ const Dashboard = () => {
               </Typography>
             </Box>
           ))}
+          <Box sx={{ display: "flex", alignItems: "center", ml: { xs: 0, md: 1 } }}>
+            <button
+              onClick={() => signOut()}
+              style={{
+                background: "transparent",
+                border: "1px solid #1a3d5c",
+                borderRadius: 4,
+                color: "#5a7898",
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: "pointer",
+                padding: "5px 12px",
+                fontFamily: "'Inter', sans-serif",
+                letterSpacing: "0.04em",
+              }}
+              onMouseEnter={e => { e.target.style.borderColor = "#a0b4c8"; e.target.style.color = "#a0b4c8"; }}
+              onMouseLeave={e => { e.target.style.borderColor = "#1a3d5c"; e.target.style.color = "#5a7898"; }}
+            >
+              Sign Out
+            </button>
+          </Box>
         </Box>
       </Box>
 
@@ -3485,6 +3740,119 @@ const Dashboard = () => {
                     flexBasis: { md: "50%" },
                   }}
                 >
+                  {(chartPane === "neopoli" || chartPane === "opportunity") && (
+                    <Card
+                      elevation={0}
+                      sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}
+                    >
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          px: 2,
+                          py: 1.25,
+                          borderBottom: showTabOverview
+                            ? `1px solid ${C.border}`
+                            : "none",
+                          cursor: "pointer",
+                        }}
+                        onClick={() => setShowTabOverview((v) => !v)}
+                      >
+                        <Typography
+                          sx={{
+                            fontSize: 10,
+                            fontWeight: 800,
+                            color: C.navy,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.09em",
+                          }}
+                        >
+                          Ground Score Market Intelligence ·{" "}
+                          {chartPane === "neopoli"
+                            ? "Activation Markets"
+                            : "Expansion Markets"}
+                        </Typography>
+                        <span
+                          style={{
+                            fontSize: 12,
+                            fontWeight: 600,
+                            color: C.navy,
+                            userSelect: "none",
+                            border: `1px solid ${C.navy}`,
+                            borderRadius: 4,
+                            background: "#dce4ec",
+                            padding: "3px 10px",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {showTabOverview ? "HIDE" : "EXPAND"}
+                        </span>
+                      </Box>
+                      {showTabOverview && (
+                        <CardContent sx={{ pb: "12px !important" }}>
+                          <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                            {/* Platform context */}
+                            <Box>
+                              <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.09em", mb: 0.75 }}>
+                                Ground Score Market Intelligence
+                              </Typography>
+                              <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
+                                Ground Score Market Intelligence is location-intelligence based on market Ground Scores for identifying where capital deployment will generate the most durable, long-term returns. It uses deterministic scoring across economic, demographic, infrastructure, and market-readiness dimensions to surface markets that the broader investment community has not yet priced correctly — either because they are overlooked, misunderstood, or simply too early. Two complementary strategies operate within the platform, each targeting a different type of market inefficiency and a different investment product.
+                              </Typography>
+                            </Box>
+                            {/* Strategy detail */}
+                            <Box sx={{ pt: 1.5, borderTop: `1px solid ${C.border}` }}>
+                              <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.09em", mb: 0.75 }}>
+                                {chartPane === "neopoli" ? "Activation Markets" : "Expansion Markets"}
+                              </Typography>
+                              {chartPane === "neopoli" && (
+                                <>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
+                                    Distressed secondary and tertiary markets are systematically mispriced. When a low cost basis, measurable economic distress, and a credible activation catalyst converge — a major employer commitment, federal infrastructure award, or large-scale institutional investment — capital deployed ahead of that activation captures the re-rating before the broader market prices it in.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
+                                    Markets where current pricing still reflects the distressed baseline rather than the coming transformation. Ground Score screens for the convergence of cost advantage, distress depth, momentum signals, and catalyst evidence — the combination that historically precedes a breakout.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Investment strategy — </span>
+                                    Acquire existing multifamily, mixed-use, or industrial assets at a low basis ahead of the activation event. Hold through the re-rating. Exit into a market that has repriced to reflect its new trajectory.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Dimensions —</span>
+                                    Each market is evaluated across 12 fixed dimensions — covering cost, distress, demographic and labor momentum, business activity, catalysts, anchor institutions, infrastructure, logistics, governance, risk, and regulatory friction — sourced from the U.S. Census Bureau, Bureau of Labor Statistics, DOE, and other official public sources. The goal is not to find the cheapest place but to find where <span style={{ fontStyle: "italic", color: C.charcoal }}>low cost, distress, momentum, and executability align</span>. A higher composite score means stronger convergence of those conditions; green tiers represent viable candidates worth advancing, gray indicates insufficient evidence for near-term prioritization.
+                                  </Typography>
+                                </>
+                              )}
+                              {chartPane === "opportunity" && (
+                                <>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
+                                    High-growth metro fringe markets consistently underbuild relative to confirmed household demand. A master-planned community positioned ahead of the next expansion wave — with the right metro proximity, school district, and lifestyle offering — captures premium pricing and rapid absorption that established infill markets cannot match.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
+                                    Greenfield sites at the edge of proven growth corridors where population is already arriving, land is still at agricultural pricing, entitlement conditions are favorable, and no competing master-planned supply has yet broken ground.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Investment strategy — </span>
+                                    Acquire raw or agricultural land at the metro fringe before residential demand is fully reflected in land pricing. Entitle and develop a master-planned community targeting family households. Monetize through lot sales, homebuilder partnerships, and long-term community infrastructure ownership.
+                                  </Typography>
+                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
+                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Dimensions —</span>
+                                    Each market is evaluated across 12 fixed dimensions — covering metro adjacency, population and migration momentum, land availability, household income, employment base, school district quality, housing demand pressure, infrastructure capacity, permitting climate, natural amenity, risk resilience, and tax environment — sourced from the U.S. Census Bureau, BLS, Zillow, NCES, FEMA National Risk Index, and local market estimates. The goal is not to find the fastest-growing place but to find where <span style={{ fontStyle: "italic", color: C.charcoal }}>confirmed demand, affordable land, and a favorable development environment align</span> before competing supply arrives. The current 15 markets are Activation Markets candidates — all are expected to score poorly here, validating thesis separation. Dedicated Expansion candidates will be added as data is sourced.
+                                  </Typography>
+                                </>
+                              )}
+                            </Box>
+                          </Box>
+                        </CardContent>
+                      )}
+                    </Card>
+                  )}
+
                   {chartPane !== "model" && chartPane !== "coordinated" && (
                     <Card
                       elevation={0}
@@ -3980,6 +4348,10 @@ const Dashboard = () => {
                                       countyName={m?.name || ""}
                                       selectedCityFips={selectedCityFips}
                                       onCitySelect={selectCityManually}
+                                      showOZ={showOZ}
+                                      onToggleOZ={() => setShowOZ((v) => !v)}
+                                      ozGeoData={ozGeoData}
+                                      ozLoading={ozLoading}
                                     />
                                   ) : (
                                     <Box
@@ -4062,6 +4434,7 @@ const Dashboard = () => {
                                           "State",
                                           "Ground Score",
                                           "Tier",
+                                          "HPA Outlook",
                                         ].map((h) => (
                                           <th
                                             key={h}
@@ -4089,6 +4462,10 @@ const Dashboard = () => {
                                           NEOPOLI_TIER_META.watchlist;
                                         const isSelected =
                                           neopoliMarket === m.fips;
+                                        const kalshiMtg = kalshiData?.series?.KXMORTGAGERATE?.markets?.length > 0
+                                          ? kalshiMedian(kalshiData.series.KXMORTGAGERATE.markets)?.value ?? null
+                                          : null;
+                                        const hpaOut = _hpaOutlook(m.metrics, kalshiMtg);
                                         return (
                                           <tr
                                             key={m.fips}
@@ -4215,6 +4592,21 @@ const Dashboard = () => {
                                               >
                                                 {tierMeta.label}
                                               </span>
+                                            </td>
+                                            <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                              {hpaOut ? (
+                                                <span style={{
+                                                  fontSize: 10, fontWeight: 700,
+                                                  color: isSelected ? C.navy : hpaOut.color,
+                                                  background: isSelected ? C.white : hpaOut.color + "1a",
+                                                  border: `1px solid ${isSelected ? C.white : hpaOut.color + "55"}`,
+                                                  borderRadius: 4, padding: "2px 7px",
+                                                }}>
+                                                  {hpaOut.label}
+                                                </span>
+                                              ) : (
+                                                <span style={{ fontSize: 10, color: C.muted }}>—</span>
+                                              )}
                                             </td>
                                           </tr>
                                         );
@@ -4539,6 +4931,10 @@ const Dashboard = () => {
                                       countyName={m?.name || ""}
                                       selectedCityFips={selectedCityFips}
                                       onCitySelect={selectCityManually}
+                                      showOZ={showOZ}
+                                      onToggleOZ={() => setShowOZ((v) => !v)}
+                                      ozGeoData={ozGeoData}
+                                      ozLoading={ozLoading}
                                     />
                                   ) : (
                                     <Box
@@ -4621,6 +5017,7 @@ const Dashboard = () => {
                                           "State",
                                           "Ground Score",
                                           "Tier",
+                                          "HPA Outlook",
                                         ].map((h) => (
                                           <th
                                             key={h}
@@ -4648,6 +5045,10 @@ const Dashboard = () => {
                                           NEOPOLI_TIER_META.watchlist;
                                         const isSelected =
                                           neopoliMarket === m.fips;
+                                        const kalshiMtg = kalshiData?.series?.KXMORTGAGERATE?.markets?.length > 0
+                                          ? kalshiMedian(kalshiData.series.KXMORTGAGERATE.markets)?.value ?? null
+                                          : null;
+                                        const hpaOut = _hpaOutlook(m.metrics, kalshiMtg);
                                         return (
                                           <tr
                                             key={m.fips}
@@ -4774,6 +5175,21 @@ const Dashboard = () => {
                                               >
                                                 {tierMeta.label}
                                               </span>
+                                            </td>
+                                            <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                              {hpaOut ? (
+                                                <span style={{
+                                                  fontSize: 10, fontWeight: 700,
+                                                  color: isSelected ? C.navy : hpaOut.color,
+                                                  background: isSelected ? C.white : hpaOut.color + "1a",
+                                                  border: `1px solid ${isSelected ? C.white : hpaOut.color + "55"}`,
+                                                  borderRadius: 4, padding: "2px 7px",
+                                                }}>
+                                                  {hpaOut.label}
+                                                </span>
+                                              ) : (
+                                                <span style={{ fontSize: 10, color: C.muted }}>—</span>
+                                              )}
                                             </td>
                                           </tr>
                                         );
@@ -6848,368 +7264,6 @@ const Dashboard = () => {
                     );
                   })()}
 
-                  {/* Urban Signals Overview — shown for both urban tabs */}
-                  {(chartPane === "neopoli" || chartPane === "opportunity") && (
-                    <Card
-                      elevation={0}
-                      sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}
-                    >
-                      <Box
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          px: 2,
-                          py: 1.25,
-                          borderBottom: showTabOverview
-                            ? `1px solid ${C.border}`
-                            : "none",
-                          cursor: "pointer",
-                        }}
-                        onClick={() => setShowTabOverview((v) => !v)}
-                      >
-                        <Typography
-                          sx={{
-                            fontSize: 10,
-                            fontWeight: 800,
-                            color: C.navy,
-                            textTransform: "uppercase",
-                            letterSpacing: "0.09em",
-                          }}
-                        >
-                          Ground Score Market Intelligence ·{" "}
-                          {chartPane === "neopoli"
-                            ? "Activation Markets"
-                            : "Expansion Markets"}
-                        </Typography>
-                        <span
-                          style={{
-                            fontSize: 12,
-                            fontWeight: 600,
-                            color: C.navy,
-                            userSelect: "none",
-                            border: `1px solid ${C.navy}`,
-                            borderRadius: 4,
-                            background: "#dce4ec",
-                            padding: "3px 10px",
-                            cursor: "pointer",
-                          }}
-                        >
-                          {showTabOverview ? "HIDE" : "EXPAND"}
-                        </span>
-                      </Box>
-                      {showTabOverview && (
-                        <CardContent sx={{ pb: "12px !important" }}>
-                          <Box
-                            sx={{
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: 2,
-                            }}
-                          >
-                            {/* Platform context */}
-                            <Box>
-                              <Typography
-                                sx={{
-                                  fontSize: 10,
-                                  fontWeight: 800,
-                                  color: C.navy,
-                                  textTransform: "uppercase",
-                                  letterSpacing: "0.09em",
-                                  mb: 0.75,
-                                }}
-                              >
-                                Ground Score Market Intelligence
-                              </Typography>
-                              <Typography
-                                sx={{
-                                  fontSize: 11,
-                                  color: C.muted,
-                                  lineHeight: 1.7,
-                                }}
-                              >
-                                Ground Score Market Intelligence is
-                                location-intelligence based on market Ground
-                                Scores for identifying where capital deployment
-                                will generate the most durable, long-term
-                                returns. It uses deterministic scoring across
-                                economic, demographic, infrastructure, and
-                                market-readiness dimensions to surface markets
-                                that the broader investment community has not
-                                yet priced correctly — either because they are
-                                overlooked, misunderstood, or simply too early.
-                                Two complementary strategies operate within the
-                                platform, each targeting a different type of
-                                market inefficiency and a different investment
-                                product.
-                              </Typography>
-                            </Box>
-                            {/* Strategy detail */}
-                            <Box
-                              sx={{
-                                pt: 1.5,
-                                borderTop: `1px solid ${C.border}`,
-                              }}
-                            >
-                              <Typography
-                                sx={{
-                                  fontSize: 10,
-                                  fontWeight: 800,
-                                  color: C.navy,
-                                  textTransform: "uppercase",
-                                  letterSpacing: "0.09em",
-                                  mb: 0.75,
-                                }}
-                              >
-                                {chartPane === "neopoli"
-                                  ? "Activation Markets"
-                                  : "Expansion Markets"}
-                              </Typography>
-                              {chartPane === "neopoli" && (
-                                <>
-                                  <Typography
-                                    sx={{
-                                      fontSize: 11,
-                                      color: C.muted,
-                                      lineHeight: 1.7,
-                                      mb: 0.75,
-                                    }}
-                                  >
-                                    <span
-                                      style={{
-                                        fontWeight: 700,
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      Thesis —{" "}
-                                    </span>
-                                    Distressed secondary and tertiary markets
-                                    are systematically mispriced. When a low
-                                    cost basis, measurable economic distress,
-                                    and a credible activation catalyst converge
-                                    — a major employer commitment, federal
-                                    infrastructure award, or large-scale
-                                    institutional investment — capital deployed
-                                    ahead of that activation captures the
-                                    re-rating before the broader market prices
-                                    it in.
-                                  </Typography>
-                                  <Typography
-                                    sx={{
-                                      fontSize: 11,
-                                      color: C.muted,
-                                      lineHeight: 1.7,
-                                      mb: 0.75,
-                                    }}
-                                  >
-                                    <span
-                                      style={{
-                                        fontWeight: 700,
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      What it uncovers —{" "}
-                                    </span>
-                                    Markets where current pricing still reflects
-                                    the distressed baseline rather than the
-                                    coming transformation. Ground Score screens
-                                    for the convergence of cost advantage,
-                                    distress depth, momentum signals, and
-                                    catalyst evidence — the combination that
-                                    historically precedes a breakout.
-                                  </Typography>
-                                  <Typography
-                                    sx={{
-                                      fontSize: 11,
-                                      color: C.muted,
-                                      lineHeight: 1.7,
-                                      mb: 0.75,
-                                    }}
-                                  >
-                                    <span
-                                      style={{
-                                        fontWeight: 700,
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      Investment strategy —{" "}
-                                    </span>
-                                    Acquire existing multifamily, mixed-use, or
-                                    industrial assets at a low basis ahead of
-                                    the activation event. Hold through the
-                                    re-rating. Exit into a market that has
-                                    repriced to reflect its new trajectory.
-                                  </Typography>
-                                  <Typography
-                                    sx={{
-                                      fontSize: 11,
-                                      color: C.muted,
-                                      lineHeight: 1.7,
-                                    }}
-                                  >
-                                    <span
-                                      style={{
-                                        fontWeight: 700,
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      Dimensions —
-                                    </span>
-                                    Each market is evaluated across 12 fixed
-                                    dimensions — covering cost, distress,
-                                    demographic and labor momentum, business
-                                    activity, catalysts, anchor institutions,
-                                    infrastructure, logistics, governance, risk,
-                                    and regulatory friction — sourced from the
-                                    U.S. Census Bureau, Bureau of Labor
-                                    Statistics, DOE, and other official public
-                                    sources. The goal is not to find the
-                                    cheapest place but to find where{" "}
-                                    <span
-                                      style={{
-                                        fontStyle: "italic",
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      low cost, distress, momentum, and
-                                      executability align
-                                    </span>
-                                    . A higher composite score means stronger
-                                    convergence of those conditions; green tiers
-                                    represent viable candidates worth advancing,
-                                    gray indicates insufficient evidence for
-                                    near-term prioritization.
-                                  </Typography>
-                                </>
-                              )}
-                              {chartPane === "opportunity" && (
-                                <>
-                                  <Typography
-                                    sx={{
-                                      fontSize: 11,
-                                      color: C.muted,
-                                      lineHeight: 1.7,
-                                      mb: 0.75,
-                                    }}
-                                  >
-                                    <span
-                                      style={{
-                                        fontWeight: 700,
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      Thesis —{" "}
-                                    </span>
-                                    High-growth metro fringe markets
-                                    consistently underbuild relative to
-                                    confirmed household demand. A master-planned
-                                    community positioned ahead of the next
-                                    expansion wave — with the right metro
-                                    proximity, school district, and lifestyle
-                                    offering — captures premium pricing and
-                                    rapid absorption that established infill
-                                    markets cannot match.
-                                  </Typography>
-                                  <Typography
-                                    sx={{
-                                      fontSize: 11,
-                                      color: C.muted,
-                                      lineHeight: 1.7,
-                                      mb: 0.75,
-                                    }}
-                                  >
-                                    <span
-                                      style={{
-                                        fontWeight: 700,
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      What it uncovers —{" "}
-                                    </span>
-                                    Greenfield sites at the edge of proven
-                                    growth corridors where population is already
-                                    arriving, land is still at agricultural
-                                    pricing, entitlement conditions are
-                                    favorable, and no competing master-planned
-                                    supply has yet broken ground.
-                                  </Typography>
-                                  <Typography
-                                    sx={{
-                                      fontSize: 11,
-                                      color: C.muted,
-                                      lineHeight: 1.7,
-                                      mb: 0.75,
-                                    }}
-                                  >
-                                    <span
-                                      style={{
-                                        fontWeight: 700,
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      Investment strategy —{" "}
-                                    </span>
-                                    Acquire raw or agricultural land at the
-                                    metro fringe before residential demand is
-                                    fully reflected in land pricing. Entitle and
-                                    develop a master-planned community targeting
-                                    family households. Monetize through lot
-                                    sales, homebuilder partnerships, and
-                                    long-term community infrastructure
-                                    ownership.
-                                  </Typography>
-                                  <Typography
-                                    sx={{
-                                      fontSize: 11,
-                                      color: C.muted,
-                                      lineHeight: 1.7,
-                                    }}
-                                  >
-                                    <span
-                                      style={{
-                                        fontWeight: 700,
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      Dimensions —
-                                    </span>
-                                    Each market is evaluated across 12 fixed
-                                    dimensions — covering metro adjacency,
-                                    population and migration momentum, land
-                                    availability, household income, employment
-                                    base, school district quality, housing
-                                    demand pressure, infrastructure capacity,
-                                    permitting climate, natural amenity, risk
-                                    resilience, and tax environment — sourced
-                                    from the U.S. Census Bureau, BLS, Zillow,
-                                    NCES, FEMA National Risk Index, and local
-                                    market estimates. The goal is not to find
-                                    the fastest-growing place but to find where{" "}
-                                    <span
-                                      style={{
-                                        fontStyle: "italic",
-                                        color: C.charcoal,
-                                      }}
-                                    >
-                                      confirmed demand, affordable land, and a
-                                      favorable development environment align
-                                    </span>{" "}
-                                    before competing supply arrives. The current
-                                    15 markets are Activation Markets candidates
-                                    — all are expected to score poorly here,
-                                    validating thesis separation. Dedicated
-                                    Expansion candidates will be added as data
-                                    is sourced.
-                                  </Typography>
-                                </>
-                              )}
-                            </Box>
-                          </Box>
-                        </CardContent>
-                      )}
-                    </Card>
-                  )}
-
                   {chartPane === "portfolio" && (
                     <Box
                       sx={{
@@ -8355,8 +8409,9 @@ const Dashboard = () => {
                               const tiles = Object.entries(
                                 KALSHI_SERIES_META,
                               ).map(([series, meta]) => {
-                                const markets =
-                                  kalshiData.series[series]?.markets ?? [];
+                                const seriesData = kalshiData.series[series] ?? {};
+                                const markets = seriesData.markets ?? [];
+                                const isSettled = seriesData.settled === true;
                                 const medianResult = kalshiMedian(markets);
                                 const closeDate = medianResult?.closeDate
                                   ? new Date(
@@ -8364,6 +8419,7 @@ const Dashboard = () => {
                                     ).toLocaleDateString("en-US", {
                                       month: "short",
                                       day: "numeric",
+                                      year: "numeric",
                                     })
                                   : null;
                                 return {
@@ -8372,6 +8428,7 @@ const Dashboard = () => {
                                   median: medianResult,
                                   closeDate,
                                   count: markets.length,
+                                  isSettled,
                                 };
                               });
                               return (
@@ -8389,6 +8446,7 @@ const Dashboard = () => {
                                       median: m,
                                       closeDate,
                                       count,
+                                      isSettled,
                                     }) => {
                                       const sig =
                                         m != null && meta.housingSignal
@@ -8412,6 +8470,7 @@ const Dashboard = () => {
                                             background: sigColor
                                               ? sigColor + "0d"
                                               : "transparent",
+                                            opacity: isSettled ? 0.75 : 1,
                                           }}
                                         >
                                           <Typography
@@ -8453,9 +8512,11 @@ const Dashboard = () => {
                                                   color: C.muted,
                                                 }}
                                               >
-                                                {m.prefix
-                                                  ? "boundary estimate"
-                                                  : "market median"}
+                                                {isSettled
+                                                  ? "last settled"
+                                                  : m.prefix
+                                                    ? "boundary estimate"
+                                                    : "market median"}
                                               </Typography>
                                               {closeDate && (
                                                 <Typography
@@ -8466,9 +8527,9 @@ const Dashboard = () => {
                                                     fontStyle: "italic",
                                                   }}
                                                 >
-                                                  closes {closeDate} ·{" "}
-                                                  {m.cohortCount ?? count}{" "}
-                                                  markets
+                                                  {isSettled
+                                                    ? `settled ${closeDate}`
+                                                    : `closes ${closeDate} · ${m.cohortCount ?? count} markets`}
                                                 </Typography>
                                               )}
                                             </>
@@ -8480,9 +8541,7 @@ const Dashboard = () => {
                                                 fontStyle: "italic",
                                               }}
                                             >
-                                              {count === 0
-                                                ? "No open markets"
-                                                : "Insufficient data"}
+                                              No data
                                             </Typography>
                                           )}
                                         </Box>
@@ -8887,6 +8946,42 @@ const Dashboard = () => {
                                 </Box>
                               </Box>
                               <CardContent sx={{ pb: "12px !important" }}>
+                                {(() => {
+                                  const kalshiMtg = kalshiData?.series?.KXMORTGAGERATE?.markets?.length > 0
+                                    ? kalshiMedian(kalshiData.series.KXMORTGAGERATE.markets)?.value ?? null
+                                    : null;
+                                  const hpa = _hpaOutlook(m.metrics, kalshiMtg);
+                                  if (!hpa) return null;
+                                  return (
+                                    <Box sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.border}` }}>
+                                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.75 }}>
+                                        HPA Outlook · 5-signal composite
+                                      </Typography>
+                                      <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                                        <Box sx={{ flex: "0 0 100px", minWidth: 95, border: `1px solid ${hpa.color}44`, borderRadius: 1, p: 1, background: hpa.color + "18" }}>
+                                          <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
+                                          <Typography sx={{ fontSize: 16, fontWeight: 700, color: hpa.color, lineHeight: 1.1 }}>
+                                            {hpa.hpaLow >= 0 ? "+" : ""}{hpa.hpaLow}-{hpa.hpaHigh}%
+                                          </Typography>
+                                          <Typography sx={{ fontSize: 9, color: C.muted }}>avg HPA/yr</Typography>
+                                          <Typography sx={{ fontSize: 9, fontWeight: 700, color: hpa.color, mt: 0.25 }}>{hpa.label}</Typography>
+                                        </Box>
+                                        {hpa.drivers.map((d) => {
+                                          const dc = d.score >= 0.6 ? C.greenLight : d.score >= 0.35 ? "#f0a500" : "#e57373";
+                                          return (
+                                            <Box key={d.key} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d" }}>
+                                              <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                              <Typography sx={{ fontSize: 13, fontWeight: 700, color: dc, lineHeight: 1.1 }}>
+                                                {d.value ?? "—"}
+                                              </Typography>
+                                              <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.25, lineHeight: 1.4 }}>{d.detail}</Typography>
+                                            </Box>
+                                          );
+                                        })}
+                                      </Box>
+                                    </Box>
+                                  );
+                                })()}
                                 {deepDives[`activation:${m.fips}`] ? (
                                   <Box sx={{ mb: 1.5 }}>
                                     {renderDeepDive(
@@ -9128,6 +9223,141 @@ const Dashboard = () => {
                                     </Box>
                                   );
                                 })()}
+                                {/* ── American Pledge Impact Card — Activation ── */}
+                                {groundScoreData &&
+                                  (() => {
+                                    const apM = groundScoreData.activation.find((x) => x.fips === neopoliMarket) || groundScoreData.activation[0];
+                                    const zhvi = apM?.metrics?.zhvi_latest || m.cities?.[0]?.metrics?.zhvi_latest;
+                                    const hhi  = apM?.metrics?.median_hhi  || m.cities?.[0]?.metrics?.median_hhi;
+                                    if (!zhvi || !hhi) return (
+                                      <Box sx={{ mt: 1.5, p: 1.5, border: `1px solid ${C.border}`, borderRadius: 1, background: C.bg }}>
+                                        <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.5 }}>American Pledge · Market Impact Analysis</Typography>
+                                        <Typography sx={{ fontSize: 11, color: C.muted }}>Insufficient housing data to calculate loan comparisons for this area.</Typography>
+                                      </Box>
+                                    );
+                                    const stdPI      = _monthlyMortgage(zhvi, 0.03);
+                                    const stdPMI     = _monthlyPMI(zhvi, 0.03);
+                                    const stdPayment = stdPI + stdPMI;
+                                    const apPayment  = _monthlyMortgage(zhvi, 0.20);
+                                    const stdDTI     = _housingDTI(zhvi, hhi, 0.03);
+                                    const apDTI      = _housingDTI(zhvi, hhi, 0.20);
+                                    const stdPool    = _buyerPoolPct(zhvi, hhi, 0.03);
+                                    const apPool     = _buyerPoolPct(zhvi, hhi, 0.20);
+                                    const lift       = apPool - stdPool;
+                                    const totalSavings = stdPayment - apPayment;
+                                    const pmiSavings = stdPMI;
+                                    const dpReach    = _downPaymentReachPct(zhvi, 0.03, hhi, 3, 0.10);
+                                    const estHH      = Math.round((apM.population || 0) / 2.53);
+                                    const unlockedHH = Math.round((lift / 100) * estHH);
+                                    const fmtHH = (n) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
+                                    const countyLabel = apM.name.replace(/\s+County$/i, "");
+                                    return (
+                                      <Box sx={{ mt: 1.5 }}>
+                                          <Box sx={{ display: "flex", gap: 1.5, mb: 2, flexWrap: "wrap" }}>
+                                            {/* Standard */}
+                                            <Box sx={{ flex: "1 1 140px", border: `1px solid ${C.border}`, borderRadius: 1, p: 1.5, background: C.bg }}>
+                                              <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>Standard · 3% Down (Fannie/Freddie)</Typography>
+                                              <Typography sx={{ fontSize: 26, fontWeight: 800, color: C.charcoal, lineHeight: 1 }}>${Math.round(stdPayment).toLocaleString()}</Typography>
+                                              <Typography sx={{ fontSize: 10, color: C.muted, mb: 0.75 }}>P&amp;I: ${Math.round(stdPI).toLocaleString()} + ${Math.round(stdPMI).toLocaleString()} PMI</Typography>
+                                              <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5, mb: 0.25 }}>
+                                                <Typography sx={{ fontSize: 13, fontWeight: 800, color: C.charcoal }}>{stdDTI.toFixed(1)}%</Typography>
+                                                <Typography sx={{ fontSize: 10, color: C.muted }}>housing DTI</Typography>
+                                              </Box>
+                                              <Typography sx={{ fontSize: 10, color: C.muted, mb: 0.75 }}>~{stdPool.toFixed(0)}% can qualify</Typography>
+                                              {(() => {
+                                                const req = Math.round((stdPayment / 0.43) * 12);
+                                                const delta = req - hhi;
+                                                const absFmt = `$${Math.round(Math.abs(delta) / 1000).toLocaleString()}k`;
+                                                return (
+                                                  <Box sx={{ pt: 0.75, borderTop: `1px solid ${C.border}` }}>
+                                                    <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.25 }}>Min. Income to Qualify</Typography>
+                                                    <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.charcoal, lineHeight: 1, mb: 0.25 }}>${Math.round(req / 1000).toLocaleString()}k/yr</Typography>
+                                                    <Typography sx={{ fontSize: 10, fontWeight: 700, color: delta > 0 ? "#ef4444" : C.green }}>
+                                                      {delta > 0 ? `▲ ${absFmt} above median` : `▼ ${absFmt} below median`}
+                                                    </Typography>
+                                                  </Box>
+                                                );
+                                              })()}
+                                              {dpReach != null && <Typography sx={{ fontSize: 10, color: "#f59e0b", fontWeight: 600, mt: 0.75 }}>~{dpReach.toFixed(0)}% can save 3% down in 3 yrs</Typography>}
+                                            </Box>
+                                            {/* American Pledge */}
+                                            <Box sx={{ flex: "1 1 140px", border: `2px solid ${C.navy}`, borderRadius: 1, p: 1.5, background: C.navy, position: "relative" }}>
+                                              <Typography sx={{ fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,0.6)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>American Pledge · 20% Down</Typography>
+                                              <Box sx={{ display: "flex", alignItems: "flex-start", gap: "24px", mb: 0 }}>
+                                                <Typography sx={{ fontSize: 26, fontWeight: 800, color: C.white, lineHeight: 1 }}>${Math.round(apPayment).toLocaleString()}</Typography>
+                                                <Box sx={{ pt: 0.25 }}>
+                                                  <Typography sx={{ fontSize: 10, color: "#7ee8a2", fontWeight: 700, lineHeight: 1.3 }}>saves ${Math.round(totalSavings).toLocaleString()}/mo</Typography>
+                                                  <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.45)", lineHeight: 1.3 }}>${Math.round(pmiSavings).toLocaleString()} PMI eliminated</Typography>
+                                                </Box>
+                                              </Box>
+                                              <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.6)", mb: 0.75 }}>P&amp;I: ${Math.round(apPayment).toLocaleString()} + no PMI</Typography>
+                                              <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5, mb: 0.25 }}>
+                                                <Typography sx={{ fontSize: 13, fontWeight: 800, color: C.white }}>{apDTI.toFixed(1)}%</Typography>
+                                                <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.6)" }}>housing DTI</Typography>
+                                              </Box>
+                                              <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.75)", mb: 0.75 }}>~{apPool.toFixed(0)}% of households qualify</Typography>
+                                              {(() => {
+                                                const req = Math.round((apPayment / 0.43) * 12);
+                                                const delta = req - hhi;
+                                                const absFmt = `$${Math.round(Math.abs(delta) / 1000).toLocaleString()}k`;
+                                                return (
+                                                  <Box sx={{ pt: 0.75, borderTop: `1px solid rgba(255,255,255,0.15)` }}>
+                                                    <Typography sx={{ fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.25 }}>Min. Income to Qualify</Typography>
+                                                    <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.white, lineHeight: 1, mb: 0.25 }}>${Math.round(req / 1000).toLocaleString()}k/yr</Typography>
+                                                    <Typography sx={{ fontSize: 10, fontWeight: 700, color: delta > 0 ? "#fca5a5" : "#7ee8a2" }}>
+                                                      {delta > 0 ? `▲ ${absFmt} above median` : `▼ ${absFmt} below median`}
+                                                    </Typography>
+                                                  </Box>
+                                                );
+                                              })()}
+                                              <img src="/ampledge_white.svg" alt="" style={{ position: "absolute", bottom: 8, right: 8, width: 18, height: 18, objectFit: "contain", opacity: 1 }} />
+                                            </Box>
+                                            {/* Buyer Affordability Lift */}
+                                            <Box sx={{ flex: "1 1 100px", border: `1px solid ${C.greenLight}55`, borderRadius: 1, p: 1.5, background: C.greenLight + "12", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                                              <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.5 }}>Buyer Affordability Lift</Typography>
+                                              <Typography sx={{ fontSize: 34, fontWeight: 800, color: C.greenLight, lineHeight: 1 }}>+{lift.toFixed(0)}</Typography>
+                                              <Typography sx={{ fontSize: 10, color: C.green, fontWeight: 600, mb: 1 }}>pts buyer pool</Typography>
+                                              {unlockedHH > 0 && <>
+                                                <Typography sx={{ fontSize: 22, fontWeight: 800, color: C.charcoal, lineHeight: 1 }}>~{fmtHH(unlockedHH)}</Typography>
+                                                <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.25 }}>additional qualifying HH</Typography>
+                                              </>}
+                                            </Box>
+                                          </Box>
+                                          {/* Buyer pool bars */}
+                                          <Box sx={{ mb: 2 }}>
+                                            <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 1.25 }}>Qualifying Buyer Pool</Typography>
+                                            {[{ label: "Standard (3% down + PMI)", val: stdPool, color: C.muted, bar: "#b0b8c4" }, { label: "American Pledge (20% down, no PMI)", val: apPool, color: C.navy, bar: C.navy }].map(({ label, val, color, bar }) => (
+                                              <Box key={label} sx={{ mb: 1 }}>
+                                                <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", mb: 0.4 }}>
+                                                  <span style={{ fontSize: 10, color: C.charcoal, fontWeight: 600 }}>{label}</span>
+                                                  <span style={{ fontSize: 11, fontWeight: 700, color }}>{val.toFixed(0)}%</span>
+                                                </Box>
+                                                <Box sx={{ height: 10, background: C.border, borderRadius: 2 }}>
+                                                  <Box sx={{ width: `${val}%`, height: "100%", background: bar, borderRadius: 2, transition: "width 0.6s cubic-bezier(0.4,0,0.2,1)" }} />
+                                                </Box>
+                                              </Box>
+                                            ))}
+                                          </Box>
+                                          {/* Headline + explanation */}
+                                          <Box sx={{ borderTop: `1px solid ${C.border}`, pt: 1.25 }}>
+                                            {unlockedHH > 0 && <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.navy, mb: 0.75 }}>American Pledge unlocks ~{fmtHH(unlockedHH)} additional qualifying households in {countyLabel} County ({lift.toFixed(0)} pt buyer pool lift × ~{fmtHH(estHH)} est. households)</Typography>}
+                                            <Box sx={{ background: "rgba(39,174,96,0.07)", border: "1px solid rgba(39,174,96,0.333)", borderRadius: 1, p: 1.5, mb: 1.25 }}>
+                                              <Typography sx={{ fontSize: 10, fontWeight: 800, color: "rgb(26,122,74)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>What This Means</Typography>
+                                              <Typography sx={{ fontSize: 11, color: "rgb(26,122,74)", lineHeight: 1.75 }}>
+                                                {dpReach != null ? `~${dpReach.toFixed(0)}% of ${countyLabel} households could save the 3% down payment in three years — so the down payment itself is not the primary barrier. The real constraint is monthly cash flow: standard financing at 3% down + PMI requires $${Math.round(stdPayment).toLocaleString()}/mo (${stdDTI.toFixed(1)}% DTI), leaving only ~${stdPool.toFixed(0)}% of households able to qualify at the median home price.` : `Standard financing at 3% down + PMI requires $${Math.round(stdPayment).toLocaleString()}/mo (${stdDTI.toFixed(1)}% DTI), leaving only ~${stdPool.toFixed(0)}% of households able to qualify at the median home price.`}
+                                              </Typography>
+                                              <Typography sx={{ fontSize: 11, color: "rgb(26,122,74)", lineHeight: 1.75, mt: 1 }}>
+                                                {`American Pledge removes both cost drivers at once: the 20% down payment shrinks the loan balance, cutting P&I by $${Math.round(totalSavings - pmiSavings).toLocaleString()}/mo, and eliminates PMI entirely (saving $${Math.round(pmiSavings).toLocaleString()}/mo). The combined $${Math.round(totalSavings).toLocaleString()}/mo reduction brings DTI from ${stdDTI.toFixed(1)}% down to ${apDTI.toFixed(1)}%, expanding the qualifying buyer pool from ~${stdPool.toFixed(0)}% to ~${apPool.toFixed(0)}% of ${countyLabel} households — directly solving the cash flow constraint that standard financing cannot address.`}
+                                              </Typography>
+                                              <Typography sx={{ fontSize: 11, color: "rgba(26,122,74,0.7)", lineHeight: 1.75, mt: 1 }}>
+                                                Housing DTI is the share of a household's gross monthly income consumed by the mortgage payment. Lenders use 43% as the qualification ceiling — households above that threshold cannot obtain financing regardless of savings or credit.
+                                              </Typography>
+                                            </Box>
+                                            <Typography sx={{ fontSize: 9, color: C.muted, mb: 1.5 }}>Housing DTI = monthly mortgage payment ÷ gross monthly income · Standard = 3% down (Fannie/Freddie min) + PMI at ~1.1%/yr · AP = 20% down, no PMI · 7% rate · 30-yr fixed · 43% DTI qualification ceiling · Down payment reach = % earning enough to save 3% down in 3 yrs at 10% savings rate · log-normal income dist. (σ=0.85) · ACS 2022 median HHI · ZHVI</Typography>
+                                          </Box>
+                                      </Box>
+                                    );
+                                  })()}
                                 <Box
                                   sx={{
                                     pt: 1.25,
@@ -10100,6 +10330,40 @@ const Dashboard = () => {
                                       ? "Near-average wages — standard labor market income environment."
                                       : "Below-average wages — lower income base; consistent with distressed market entry cost thesis.",
                             },
+                            ...(() => {
+                              const zhvi = met.zhvi_latest;
+                              const hhi  = met.median_hhi;
+                              const stdDTI   = _housingDTI(zhvi, hhi, 0.03);
+                              const apDTI    = _housingDTI(zhvi, hhi, 0.20);
+                              const stdPool  = _buyerPoolPct(zhvi, hhi, 0.03);
+                              const apPool   = _buyerPoolPct(zhvi, hhi, 0.20);
+                              const lift     = (apPool != null && stdPool != null) ? apPool - stdPool : null;
+                              const dpReach  = _downPaymentReachPct(zhvi, 0.03, hhi, 3, 0.10);
+                              const stdPmt   = (zhvi && hhi) ? _totalMonthlyPayment(zhvi, 0.03) : null;
+                              const apPmt    = zhvi ? _monthlyMortgage(zhvi, 0.20) : null;
+                              const savings  = (stdPmt != null && apPmt != null) ? stdPmt - apPmt : null;
+                              const dtiPct   = stdDTI != null ? Math.round(Math.max(0, Math.min(100, (55 - stdDTI) / (55 - 15) * 100))) : null;
+                              const apDtiPct = apDTI != null ? Math.round(Math.max(0, Math.min(100, (55 - apDTI) / (55 - 15) * 100))) : null;
+                              const countyLabel = (met.county_name || "").replace(/\s+County$/i, "");
+                              return [
+                                {
+                                  pct: dtiPct,
+                                  metric: "Buyer Affordability (Standard)",
+                                  value: stdDTI != null ? `${stdDTI.toFixed(1)}% DTI` : "—",
+                                  interp: dpReach != null
+                                    ? `~${dpReach.toFixed(0)}% of ${countyLabel} households could save the 3% down payment in 3 years — the barrier is monthly cash flow, not savings. Standard financing (3% down + PMI) requires $${stdPmt != null ? Math.round(stdPmt).toLocaleString() : "—"}/mo, qualifying only ~${stdPool != null ? stdPool.toFixed(0) : "—"}% of households.`
+                                    : `Standard financing at 3% down + PMI requires $${stdPmt != null ? Math.round(stdPmt).toLocaleString() : "—"}/mo (${stdDTI != null ? stdDTI.toFixed(1) : "—"}% DTI), qualifying ~${stdPool != null ? stdPool.toFixed(0) : "—"}% of households.`,
+                                },
+                                {
+                                  pct: apDtiPct,
+                                  metric: "Buyer Affordability (w/ American Pledge)",
+                                  value: apDTI != null ? `${apDTI.toFixed(1)}% DTI` : "—",
+                                  interp: savings != null
+                                    ? `American Pledge (20% down, no PMI) saves $${Math.round(savings).toLocaleString()}/mo, reducing DTI from ${stdDTI != null ? stdDTI.toFixed(1) : "—"}% to ${apDTI != null ? apDTI.toFixed(1) : "—"}% and expanding the qualifying buyer pool from ~${stdPool != null ? stdPool.toFixed(0) : "—"}% to ~${apPool != null ? apPool.toFixed(0) : "—"}% of households${lift != null ? ` (+${lift.toFixed(0)} pts)` : ""}.`
+                                    : `American Pledge reduces DTI to ${apDTI != null ? apDTI.toFixed(1) : "—"}%, qualifying ~${apPool != null ? apPool.toFixed(0) : "—"}% of households.`,
+                                },
+                              ];
+                            })(),
                           ];
 
                           return (
@@ -10447,7 +10711,7 @@ const Dashboard = () => {
                                       letterSpacing: "0.09em",
                                     }}
                                   >
-                                    {m.name}, {m.state} · Expansion Assessment
+                                    {m.name}, {m.state} · Market Summary
                                   </Typography>
                                   <Typography
                                     sx={{
@@ -10512,6 +10776,42 @@ const Dashboard = () => {
                                 </Box>
                               </Box>
                               <CardContent sx={{ pb: "12px !important" }}>
+                                {(() => {
+                                  const kalshiMtg = kalshiData?.series?.KXMORTGAGERATE?.markets?.length > 0
+                                    ? kalshiMedian(kalshiData.series.KXMORTGAGERATE.markets)?.value ?? null
+                                    : null;
+                                  const hpa = _hpaOutlook(m.metrics, kalshiMtg);
+                                  if (!hpa) return null;
+                                  return (
+                                    <Box sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.border}` }}>
+                                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.75 }}>
+                                        HPA Outlook · 5-signal composite
+                                      </Typography>
+                                      <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                                        <Box sx={{ flex: "0 0 100px", minWidth: 95, border: `1px solid ${hpa.color}44`, borderRadius: 1, p: 1, background: hpa.color + "18" }}>
+                                          <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
+                                          <Typography sx={{ fontSize: 16, fontWeight: 700, color: hpa.color, lineHeight: 1.1 }}>
+                                            {hpa.hpaLow >= 0 ? "+" : ""}{hpa.hpaLow}-{hpa.hpaHigh}%
+                                          </Typography>
+                                          <Typography sx={{ fontSize: 9, color: C.muted }}>avg HPA/yr</Typography>
+                                          <Typography sx={{ fontSize: 9, fontWeight: 700, color: hpa.color, mt: 0.25 }}>{hpa.label}</Typography>
+                                        </Box>
+                                        {hpa.drivers.map((d) => {
+                                          const dc = d.score >= 0.6 ? C.greenLight : d.score >= 0.35 ? "#f0a500" : "#e57373";
+                                          return (
+                                            <Box key={d.key} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d" }}>
+                                              <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                              <Typography sx={{ fontSize: 13, fontWeight: 700, color: dc, lineHeight: 1.1 }}>
+                                                {d.value ?? "—"}
+                                              </Typography>
+                                              <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.25, lineHeight: 1.4 }}>{d.detail}</Typography>
+                                            </Box>
+                                          );
+                                        })}
+                                      </Box>
+                                    </Box>
+                                  );
+                                })()}
                                 {deepDives[`expansion:${m.fips}`] ? (
                                   <Box sx={{ mb: 1.5 }}>
                                     {renderDeepDive(
@@ -10753,6 +11053,141 @@ const Dashboard = () => {
                                     </Box>
                                   );
                                 })()}
+                                {/* ── American Pledge Impact Card — Expansion ── */}
+                                {groundScoreData &&
+                                  (() => {
+                                    const apM = groundScoreData.expansion.find((x) => x.fips === neopoliMarket) || groundScoreData.expansion[0];
+                                    const zhvi = apM?.metrics?.zhvi_latest || m.cities?.[0]?.metrics?.zhvi_latest;
+                                    const hhi  = apM?.metrics?.median_hhi  || m.cities?.[0]?.metrics?.median_hhi;
+                                    if (!zhvi || !hhi) return (
+                                      <Box sx={{ mt: 1.5, p: 1.5, border: `1px solid ${C.border}`, borderRadius: 1, background: C.bg }}>
+                                        <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.5 }}>American Pledge · Market Impact Analysis</Typography>
+                                        <Typography sx={{ fontSize: 11, color: C.muted }}>Insufficient housing data to calculate loan comparisons for this area.</Typography>
+                                      </Box>
+                                    );
+                                    const stdPI      = _monthlyMortgage(zhvi, 0.03);
+                                    const stdPMI     = _monthlyPMI(zhvi, 0.03);
+                                    const stdPayment = stdPI + stdPMI;
+                                    const apPayment  = _monthlyMortgage(zhvi, 0.20);
+                                    const stdDTI     = _housingDTI(zhvi, hhi, 0.03);
+                                    const apDTI      = _housingDTI(zhvi, hhi, 0.20);
+                                    const stdPool    = _buyerPoolPct(zhvi, hhi, 0.03);
+                                    const apPool     = _buyerPoolPct(zhvi, hhi, 0.20);
+                                    const lift       = apPool - stdPool;
+                                    const totalSavings = stdPayment - apPayment;
+                                    const pmiSavings = stdPMI;
+                                    const dpReach    = _downPaymentReachPct(zhvi, 0.03, hhi, 3, 0.10);
+                                    const estHH      = Math.round((apM.population || 0) / 2.53);
+                                    const unlockedHH = Math.round((lift / 100) * estHH);
+                                    const fmtHH = (n) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString();
+                                    const countyLabel = apM.name.replace(/\s+County$/i, "");
+                                    return (
+                                      <Box sx={{ mt: 1.5 }}>
+                                          <Box sx={{ display: "flex", gap: 1.5, mb: 2, flexWrap: "wrap" }}>
+                                            {/* Standard */}
+                                            <Box sx={{ flex: "1 1 140px", border: `1px solid ${C.border}`, borderRadius: 1, p: 1.5, background: C.bg }}>
+                                              <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>Standard · 3% Down (Fannie/Freddie)</Typography>
+                                              <Typography sx={{ fontSize: 26, fontWeight: 800, color: C.charcoal, lineHeight: 1 }}>${Math.round(stdPayment).toLocaleString()}</Typography>
+                                              <Typography sx={{ fontSize: 10, color: C.muted, mb: 0.75 }}>P&amp;I: ${Math.round(stdPI).toLocaleString()} + ${Math.round(stdPMI).toLocaleString()} PMI</Typography>
+                                              <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5, mb: 0.25 }}>
+                                                <Typography sx={{ fontSize: 13, fontWeight: 800, color: C.charcoal }}>{stdDTI.toFixed(1)}%</Typography>
+                                                <Typography sx={{ fontSize: 10, color: C.muted }}>housing DTI</Typography>
+                                              </Box>
+                                              <Typography sx={{ fontSize: 10, color: C.muted, mb: 0.75 }}>~{stdPool.toFixed(0)}% can qualify</Typography>
+                                              {(() => {
+                                                const req = Math.round((stdPayment / 0.43) * 12);
+                                                const delta = req - hhi;
+                                                const absFmt = `$${Math.round(Math.abs(delta) / 1000).toLocaleString()}k`;
+                                                return (
+                                                  <Box sx={{ pt: 0.75, borderTop: `1px solid ${C.border}` }}>
+                                                    <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.25 }}>Min. Income to Qualify</Typography>
+                                                    <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.charcoal, lineHeight: 1, mb: 0.25 }}>${Math.round(req / 1000).toLocaleString()}k/yr</Typography>
+                                                    <Typography sx={{ fontSize: 10, fontWeight: 700, color: delta > 0 ? "#ef4444" : C.green }}>
+                                                      {delta > 0 ? `▲ ${absFmt} above median` : `▼ ${absFmt} below median`}
+                                                    </Typography>
+                                                  </Box>
+                                                );
+                                              })()}
+                                              {dpReach != null && <Typography sx={{ fontSize: 10, color: "#f59e0b", fontWeight: 600, mt: 0.75 }}>~{dpReach.toFixed(0)}% can save 3% down in 3 yrs</Typography>}
+                                            </Box>
+                                            {/* American Pledge */}
+                                            <Box sx={{ flex: "1 1 140px", border: `2px solid ${C.navy}`, borderRadius: 1, p: 1.5, background: C.navy, position: "relative" }}>
+                                              <Typography sx={{ fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,0.6)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>American Pledge · 20% Down</Typography>
+                                              <Box sx={{ display: "flex", alignItems: "flex-start", gap: "24px", mb: 0 }}>
+                                                <Typography sx={{ fontSize: 26, fontWeight: 800, color: C.white, lineHeight: 1 }}>${Math.round(apPayment).toLocaleString()}</Typography>
+                                                <Box sx={{ pt: 0.25 }}>
+                                                  <Typography sx={{ fontSize: 10, color: "#7ee8a2", fontWeight: 700, lineHeight: 1.3 }}>saves ${Math.round(totalSavings).toLocaleString()}/mo</Typography>
+                                                  <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.45)", lineHeight: 1.3 }}>${Math.round(pmiSavings).toLocaleString()} PMI eliminated</Typography>
+                                                </Box>
+                                              </Box>
+                                              <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.6)", mb: 0.75 }}>P&amp;I: ${Math.round(apPayment).toLocaleString()} + no PMI</Typography>
+                                              <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5, mb: 0.25 }}>
+                                                <Typography sx={{ fontSize: 13, fontWeight: 800, color: C.white }}>{apDTI.toFixed(1)}%</Typography>
+                                                <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.6)" }}>housing DTI</Typography>
+                                              </Box>
+                                              <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.75)", mb: 0.75 }}>~{apPool.toFixed(0)}% of households qualify</Typography>
+                                              {(() => {
+                                                const req = Math.round((apPayment / 0.43) * 12);
+                                                const delta = req - hhi;
+                                                const absFmt = `$${Math.round(Math.abs(delta) / 1000).toLocaleString()}k`;
+                                                return (
+                                                  <Box sx={{ pt: 0.75, borderTop: `1px solid rgba(255,255,255,0.15)` }}>
+                                                    <Typography sx={{ fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.25 }}>Min. Income to Qualify</Typography>
+                                                    <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.white, lineHeight: 1, mb: 0.25 }}>${Math.round(req / 1000).toLocaleString()}k/yr</Typography>
+                                                    <Typography sx={{ fontSize: 10, fontWeight: 700, color: delta > 0 ? "#fca5a5" : "#7ee8a2" }}>
+                                                      {delta > 0 ? `▲ ${absFmt} above median` : `▼ ${absFmt} below median`}
+                                                    </Typography>
+                                                  </Box>
+                                                );
+                                              })()}
+                                              <img src="/ampledge_white.svg" alt="" style={{ position: "absolute", bottom: 8, right: 8, width: 18, height: 18, objectFit: "contain", opacity: 1 }} />
+                                            </Box>
+                                            {/* Buyer Affordability Lift */}
+                                            <Box sx={{ flex: "1 1 100px", border: `1px solid ${C.greenLight}55`, borderRadius: 1, p: 1.5, background: C.greenLight + "12", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                                              <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.5 }}>Buyer Affordability Lift</Typography>
+                                              <Typography sx={{ fontSize: 34, fontWeight: 800, color: C.greenLight, lineHeight: 1 }}>+{lift.toFixed(0)}</Typography>
+                                              <Typography sx={{ fontSize: 10, color: C.green, fontWeight: 600, mb: 1 }}>pts buyer pool</Typography>
+                                              {unlockedHH > 0 && <>
+                                                <Typography sx={{ fontSize: 22, fontWeight: 800, color: C.charcoal, lineHeight: 1 }}>~{fmtHH(unlockedHH)}</Typography>
+                                                <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.25 }}>additional qualifying HH</Typography>
+                                              </>}
+                                            </Box>
+                                          </Box>
+                                          {/* Buyer pool bars */}
+                                          <Box sx={{ mb: 2 }}>
+                                            <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", mb: 1.25 }}>Qualifying Buyer Pool</Typography>
+                                            {[{ label: "Standard (3% down + PMI)", val: stdPool, color: C.muted, bar: "#b0b8c4" }, { label: "American Pledge (20% down, no PMI)", val: apPool, color: C.navy, bar: C.navy }].map(({ label, val, color, bar }) => (
+                                              <Box key={label} sx={{ mb: 1 }}>
+                                                <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", mb: 0.4 }}>
+                                                  <span style={{ fontSize: 10, color: C.charcoal, fontWeight: 600 }}>{label}</span>
+                                                  <span style={{ fontSize: 11, fontWeight: 700, color }}>{val.toFixed(0)}%</span>
+                                                </Box>
+                                                <Box sx={{ height: 10, background: C.border, borderRadius: 2 }}>
+                                                  <Box sx={{ width: `${val}%`, height: "100%", background: bar, borderRadius: 2, transition: "width 0.6s cubic-bezier(0.4,0,0.2,1)" }} />
+                                                </Box>
+                                              </Box>
+                                            ))}
+                                          </Box>
+                                          {/* Headline + explanation */}
+                                          <Box sx={{ borderTop: `1px solid ${C.border}`, pt: 1.25 }}>
+                                            {unlockedHH > 0 && <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.navy, mb: 0.75 }}>American Pledge unlocks ~{fmtHH(unlockedHH)} additional qualifying households in {countyLabel} County ({lift.toFixed(0)} pt buyer pool lift × ~{fmtHH(estHH)} est. households)</Typography>}
+                                            <Box sx={{ background: "rgba(39,174,96,0.07)", border: "1px solid rgba(39,174,96,0.333)", borderRadius: 1, p: 1.5, mb: 1.25 }}>
+                                              <Typography sx={{ fontSize: 10, fontWeight: 800, color: "rgb(26,122,74)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>What This Means</Typography>
+                                              <Typography sx={{ fontSize: 11, color: "rgb(26,122,74)", lineHeight: 1.75 }}>
+                                                {dpReach != null ? `~${dpReach.toFixed(0)}% of ${countyLabel} households could save the 3% down payment in three years — so the down payment itself is not the primary barrier. The real constraint is monthly cash flow: standard financing at 3% down + PMI requires $${Math.round(stdPayment).toLocaleString()}/mo (${stdDTI.toFixed(1)}% DTI), leaving only ~${stdPool.toFixed(0)}% of households able to qualify at the median home price.` : `Standard financing at 3% down + PMI requires $${Math.round(stdPayment).toLocaleString()}/mo (${stdDTI.toFixed(1)}% DTI), leaving only ~${stdPool.toFixed(0)}% of households able to qualify at the median home price.`}
+                                              </Typography>
+                                              <Typography sx={{ fontSize: 11, color: "rgb(26,122,74)", lineHeight: 1.75, mt: 1 }}>
+                                                {`American Pledge removes both cost drivers at once: the 20% down payment shrinks the loan balance, cutting P&I by $${Math.round(totalSavings - pmiSavings).toLocaleString()}/mo, and eliminates PMI entirely (saving $${Math.round(pmiSavings).toLocaleString()}/mo). The combined $${Math.round(totalSavings).toLocaleString()}/mo reduction brings DTI from ${stdDTI.toFixed(1)}% down to ${apDTI.toFixed(1)}%, expanding the qualifying buyer pool from ~${stdPool.toFixed(0)}% to ~${apPool.toFixed(0)}% of ${countyLabel} households — directly solving the cash flow constraint that standard financing cannot address.`}
+                                              </Typography>
+                                              <Typography sx={{ fontSize: 11, color: "rgba(26,122,74,0.7)", lineHeight: 1.75, mt: 1 }}>
+                                                Housing DTI is the share of a household's gross monthly income consumed by the mortgage payment. Lenders use 43% as the qualification ceiling — households above that threshold cannot obtain financing regardless of savings or credit.
+                                              </Typography>
+                                            </Box>
+                                            <Typography sx={{ fontSize: 9, color: C.muted, mb: 1.5 }}>Housing DTI = monthly mortgage payment ÷ gross monthly income · Standard = 3% down (Fannie/Freddie min) + PMI at ~1.1%/yr · AP = 20% down, no PMI · 7% rate · 30-yr fixed · 43% DTI qualification ceiling · Down payment reach = % earning enough to save 3% down in 3 yrs at 10% savings rate · log-normal income dist. (σ=0.85) · ACS 2022 median HHI · ZHVI</Typography>
+                                          </Box>
+                                      </Box>
+                                    );
+                                  })()}
                                 <Box
                                   sx={{
                                     pt: 1.25,
@@ -11689,6 +12124,40 @@ const Dashboard = () => {
                                           ? "Elevated risk — above-average insurance and resilience costs; may impact buyer qualification."
                                           : "High climate risk — significant natural hazard exposure; material impact on long-term asset value and insurability.",
                             },
+                            ...(() => {
+                              const zhvi = met.zhvi_latest;
+                              const hhi  = met.median_hhi;
+                              const stdDTI   = _housingDTI(zhvi, hhi, 0.03);
+                              const apDTI    = _housingDTI(zhvi, hhi, 0.20);
+                              const stdPool  = _buyerPoolPct(zhvi, hhi, 0.03);
+                              const apPool   = _buyerPoolPct(zhvi, hhi, 0.20);
+                              const lift     = (apPool != null && stdPool != null) ? apPool - stdPool : null;
+                              const dpReach  = _downPaymentReachPct(zhvi, 0.03, hhi, 3, 0.10);
+                              const stdPmt   = (zhvi && hhi) ? _totalMonthlyPayment(zhvi, 0.03) : null;
+                              const apPmt    = zhvi ? _monthlyMortgage(zhvi, 0.20) : null;
+                              const savings  = (stdPmt != null && apPmt != null) ? stdPmt - apPmt : null;
+                              const dtiPct   = stdDTI != null ? Math.round(Math.max(0, Math.min(100, (55 - stdDTI) / (55 - 15) * 100))) : null;
+                              const apDtiPct = apDTI != null ? Math.round(Math.max(0, Math.min(100, (55 - apDTI) / (55 - 15) * 100))) : null;
+                              const countyLabel = (met.county_name || "").replace(/\s+County$/i, "");
+                              return [
+                                {
+                                  pct: dtiPct,
+                                  metric: "Buyer Affordability (Standard)",
+                                  value: stdDTI != null ? `${stdDTI.toFixed(1)}% DTI` : "—",
+                                  interp: dpReach != null
+                                    ? `~${dpReach.toFixed(0)}% of ${countyLabel} households could save the 3% down payment in 3 years — the barrier is monthly cash flow, not savings. Standard financing (3% down + PMI) requires $${stdPmt != null ? Math.round(stdPmt).toLocaleString() : "—"}/mo, qualifying only ~${stdPool != null ? stdPool.toFixed(0) : "—"}% of households.`
+                                    : `Standard financing at 3% down + PMI requires $${stdPmt != null ? Math.round(stdPmt).toLocaleString() : "—"}/mo (${stdDTI != null ? stdDTI.toFixed(1) : "—"}% DTI), qualifying ~${stdPool != null ? stdPool.toFixed(0) : "—"}% of households.`,
+                                },
+                                {
+                                  pct: apDtiPct,
+                                  metric: "Buyer Affordability (w/ American Pledge)",
+                                  value: apDTI != null ? `${apDTI.toFixed(1)}% DTI` : "—",
+                                  interp: savings != null
+                                    ? `American Pledge (20% down, no PMI) saves $${Math.round(savings).toLocaleString()}/mo, reducing DTI from ${stdDTI != null ? stdDTI.toFixed(1) : "—"}% to ${apDTI != null ? apDTI.toFixed(1) : "—"}% and expanding the qualifying buyer pool from ~${stdPool != null ? stdPool.toFixed(0) : "—"}% to ~${apPool != null ? apPool.toFixed(0) : "—"}% of households${lift != null ? ` (+${lift.toFixed(0)} pts)` : ""}.`
+                                    : `American Pledge reduces DTI to ${apDTI != null ? apDTI.toFixed(1) : "—"}%, qualifying ~${apPool != null ? apPool.toFixed(0) : "—"}% of households.`,
+                                },
+                              ];
+                            })(),
                           ];
 
                           return (

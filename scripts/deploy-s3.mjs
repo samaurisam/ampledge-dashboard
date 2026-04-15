@@ -24,6 +24,8 @@ const sync = (excludeHtml = false, cacheControl, contentType = "") => {
     `s3://${bucket}`,
     "--delete",
     '--exclude "ground-score/*"',  // never delete pipeline data
+    '--exclude "oz_tracts.topojson"', // never delete static OZ boundary data
+    '--exclude "oz_tracts.geojson"',  // never delete static OZ boundary data
     `--cache-control "${cacheControl}"`,
     excludeHtml ? '--exclude "*.html"' : "",
     !excludeHtml ? '--exclude "*.*" --include "*.html"' : "",
