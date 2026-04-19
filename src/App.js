@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { generateAndOpenReport } from "./PropertyReport";
 import { signOut } from "aws-amplify/auth";
 import { helix } from "ldrs";
 import {
@@ -9,6 +10,8 @@ import {
   Box,
   Slider,
   Skeleton,
+  Dialog,
+  DialogContent,
 } from "@mui/material";
 import { CS_DATES, CS_HPA } from "./caseShillerData";
 import kalshiLogo from "./kalshi.svg";
@@ -123,6 +126,39 @@ const CS_ANNUAL_USA = Object.fromEntries(
 // });
 const getHPA = (yr) => CS_ANNUAL_USA[yr] ?? null;
 
+// Compound Case-Shiller appreciation from a past sale date to today.
+// Returns { appreciatedPrice, factor, pctGain, yearsHeld } or null.
+const _csAppraisedValue = (lastSalePrice, lastSaleDate) => {
+  if (!lastSalePrice || !lastSaleDate) return null;
+  const from = new Date(lastSaleDate);
+  const now = new Date();
+  if (isNaN(from.getTime())) return null;
+  const fromYear = from.getFullYear();
+  const fromMonth = from.getMonth(); // 0-indexed
+  const nowYear = now.getFullYear();
+  const nowMonth = now.getMonth();
+  const totalMonths = (nowYear - fromYear) * 12 + (nowMonth - fromMonth);
+  if (totalMonths <= 0) return { appreciatedPrice: lastSalePrice, factor: 1, pctGain: 0, yearsHeld: 0 };
+
+  let factor = 1.0;
+  for (let yr = fromYear; yr <= nowYear; yr++) {
+    const rate = (getHPA(yr) ?? 0) / 100;
+    if (yr === fromYear && yr === nowYear) {
+      factor *= Math.pow(1 + rate, (nowMonth - fromMonth) / 12);
+    } else if (yr === fromYear) {
+      factor *= Math.pow(1 + rate, (12 - fromMonth) / 12);
+    } else if (yr === nowYear) {
+      factor *= Math.pow(1 + rate, nowMonth / 12);
+    } else {
+      factor *= (1 + rate);
+    }
+  }
+  const appreciatedPrice = Math.round(lastSalePrice * factor);
+  const pctGain = Math.round((factor - 1) * 100 * 10) / 10;
+  const yearsHeld = Math.round(totalMonths / 12 * 10) / 10;
+  return { appreciatedPrice, factor, pctGain, yearsHeld };
+};
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 const avg = (arr) =>
   arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
@@ -188,6 +224,522 @@ const _buyerPoolPct = (homeValue, hhi, downPct, rate = 0.07, years = 30, dtiThre
   };
   return (1 - (1 + erfApprox(z / Math.SQRT2)) / 2) * 100;
 };
+// ─── Metric Info Dictionary ──────────────────────────────────────────────────
+const METRIC_INFO = {
+  // ── HPA Outlook signals ──────────────────────────────────────────────────
+  momentum: {
+    title: "Price Momentum",
+    subtitle: "1-yr ZHVI appreciation",
+    what: "Trailing 12-month home price appreciation measured by Zillow's Home Value Index (ZHVI). Reflects the market's realized supply/demand balance over the past year.",
+    why: "Recent appreciation is the strongest single predictor of near-term continuation. Positive momentum attracts builders, lenders, and buyers — reinforcing the trend. Negative momentum signals an oversupply or demand shock that takes time to reverse.",
+    tiers: [
+      { range: "> +5%", label: "Strong", color: "#4ade80" },
+      { range: "+2% to +5%", label: "Moderate", color: "#86efac" },
+      { range: "0% to +2%", label: "Flat", color: "#fbbf24" },
+      { range: "-3% to 0%", label: "Soft", color: "#f97316" },
+      { range: "< -3%", label: "Declining", color: "#f87171" },
+    ],
+    weight: "25% of HPA Outlook composite",
+  },
+  buyer_pool: {
+    title: "Buyer Pool Depth",
+    subtitle: "% of households qualifying at 3% down (conventional)",
+    what: "The share of local households whose income qualifies them for a mortgage on the median-priced home using a 3% down conventional loan, based on a 43% DTI ceiling and current Kalshi-implied mortgage rates.",
+    why: "A deep buyer pool means more potential buyers competing for available homes, sustaining prices. A thin pool (<20%) signals fragile demand — price growth depends on a narrow slice of high-income buyers and is vulnerable to rate increases.",
+    tiers: [
+      { range: "> 50%", label: "Deep", color: "#4ade80" },
+      { range: "40–50%", label: "Healthy", color: "#86efac" },
+      { range: "30–40%", label: "Moderate", color: "#fbbf24" },
+      { range: "20–30%", label: "Thin", color: "#f97316" },
+      { range: "< 20%", label: "Very Thin", color: "#f87171" },
+    ],
+    weight: "25% of HPA Outlook composite",
+  },
+  affordability: {
+    title: "Income Gap",
+    subtitle: "Qualifying income vs. median HHI at 10% down",
+    what: "Compares the annual income needed to qualify for the median-priced home (10% down, 43% DTI) against the county's actual median household income. A positive gap means locals can afford homes; a negative gap means qualifying income exceeds what most households earn.",
+    why: "Structural affordability constrains volume. When qualifying income consistently exceeds local income, only higher-income transplants and investors can buy — making the market sensitive to migration reversals and rate shocks. Markets where local income comfortably covers qualification tend to have durable, broad-based demand.",
+    tiers: [
+      { range: "Income > qualifying by 20%+", label: "Very Affordable", color: "#4ade80" },
+      { range: "Income within 0–20% of qualifying", label: "Affordable", color: "#86efac" },
+      { range: "Qualifying 0–20% above income", label: "Stretched", color: "#fbbf24" },
+      { range: "Qualifying > 20% above income", label: "Stressed", color: "#f87171" },
+    ],
+    weight: "20% of HPA Outlook composite",
+  },
+  demand_momentum: {
+    title: "Demand Momentum",
+    subtitle: "Population growth · Labor force participation rate",
+    what: "A composite of county-level population growth rate (annual %) and labor force participation rate (LFPR — share of working-age adults employed or job-seeking). Population growth signals net household inflow; LFPR measures workforce health.",
+    why: "Organic household formation — not investor activity — is the most durable driver of price appreciation over 5–10 year horizons. Counties gaining residents and workers consistently outperform. Declining population or low LFPR often precede multi-year price stagnation.",
+    tiers: [
+      { range: "Pop growth > 1% AND LFPR > 63%", label: "Strong", color: "#4ade80" },
+      { range: "Pop growth > 0.5% OR LFPR > 60%", label: "Moderate", color: "#86efac" },
+      { range: "Near-flat or one signal weak", label: "Mixed", color: "#fbbf24" },
+      { range: "Declining pop or LFPR < 55%", label: "Weak", color: "#f87171" },
+    ],
+    weight: "25% of HPA Outlook composite",
+  },
+  macro: {
+    title: "Rate Outlook",
+    subtitle: "Kalshi-implied 30-yr mortgage rate signal",
+    what: "Uses the median implied rate from Kalshi prediction market contracts on the 30-year fixed mortgage rate. This is a forward-looking, market-consensus estimate of where rates are heading — not a trailing average.",
+    why: "Mortgage rates are the single biggest lever on affordability. A 1% rate increase can reduce buyer pool depth by 10–15 percentage points. Markets with falling rate expectations see buyer pool expansion; rising rate expectations compress demand before price data reflects it.",
+    tiers: [
+      { range: "Rate < 6.0%", label: "Tailwind", color: "#4ade80" },
+      { range: "6.0%–6.75%", label: "Neutral", color: "#fbbf24" },
+      { range: "> 6.75%", label: "Headwind", color: "#f87171" },
+    ],
+    weight: "5% of HPA Outlook composite",
+  },
+  // ── Formation scorecard dimensions ───────────────────────────────────────
+  demo_momentum: {
+    title: "Demographic Momentum",
+    subtitle: "Population growth + net migration",
+    what: "Combines county-level population growth rate with net migration inflow (domestic + international). Captures both natural population growth and the forward-looking in-migration signal.",
+    why: "Greenfield MPC sites need a sustained wave of incoming households to support phased lot absorption over 5–10 years. Strong demographic momentum confirms the demand wave is already building — not hypothetical.",
+    tiers: [
+      { range: "Pop growth > 2%/yr + positive migration", label: "Strong Formation Wave", color: "#4ade80" },
+      { range: "Pop growth 0.5–2%", label: "Steady", color: "#86efac" },
+      { range: "Near-flat", label: "Marginal", color: "#fbbf24" },
+      { range: "Declining", label: "Demand Risk", color: "#f87171" },
+    ],
+    weight: "Formation scoring: demographic signals weighted at ~30%",
+  },
+  greenfield: {
+    title: "Greenfield Potential",
+    subtitle: "Land basis · population density",
+    what: "Measures the availability and cost of undeveloped land. Uses USDA NASS farmland value per acre as a proxy for raw land cost, and population density (persons/mi²) as a proxy for available greenfield acreage.",
+    why: "Low-density counties with affordable land are where MPC developers can acquire contiguous acreage at a basis that supports attainable pricing. High-density or high-cost counties eliminate the margin needed for greenfield development.",
+    tiers: [
+      { range: "< $3k/acre + density < 50/mi²", label: "Prime Greenfield", color: "#4ade80" },
+      { range: "$3k–$6k/acre or density 50–150/mi²", label: "Viable", color: "#86efac" },
+      { range: "$6k–$10k/acre or density 150–500/mi²", label: "Constrained", color: "#fbbf24" },
+      { range: "> $10k/acre or density > 500/mi²", label: "Not Viable", color: "#f87171" },
+    ],
+    weight: "Formation scoring: land signals weighted at ~25%",
+  },
+  dev_velocity: {
+    title: "Development Velocity",
+    subtitle: "Residential permit units per 1,000 population",
+    what: "Annual residential building permits issued per 1,000 residents (Census Building Permits Survey). Measures how actively the county is permitting new housing relative to its population base.",
+    why: "High permit velocity confirms the market can absorb new product and that the entitlement environment is permissive. Very low velocity may signal supply constraints that protect margins, or a hostile permitting climate that kills projects.",
+    tiers: [
+      { range: "> 8 units/1k", label: "High Velocity", color: "#4ade80" },
+      { range: "4–8 units/1k", label: "Active", color: "#86efac" },
+      { range: "1.5–4 units/1k", label: "Moderate", color: "#fbbf24" },
+      { range: "< 1.5 units/1k", label: "Low Activity", color: "#f87171" },
+    ],
+    weight: "Formation scoring: development signals weighted at ~20%",
+  },
+  emp_growth: {
+    title: "Employment Growth",
+    subtitle: "YoY covered employment change (BLS QCEW)",
+    what: "Year-over-year percentage change in covered employment (workers with unemployment insurance), sourced from BLS Quarterly Census of Employment and Wages. Measures whether the local job base is expanding or contracting.",
+    why: "Employment growth is the primary driver of household formation. Workers moving to fill new jobs become new home buyers. Strong job growth also increases median incomes over time, expanding the qualified buyer pool.",
+    tiers: [
+      { range: "> +3% YoY", label: "Strong Growth", color: "#4ade80" },
+      { range: "+1% to +3%", label: "Steady Growth", color: "#86efac" },
+      { range: "0% to +1%", label: "Flat", color: "#fbbf24" },
+      { range: "< 0%", label: "Contracting", color: "#f87171" },
+    ],
+    weight: "Formation scoring: employment signals weighted at ~15%",
+  },
+  buyer_quality: {
+    title: "Buyer Quality",
+    subtitle: "Median HHI · 1-yr HPA",
+    what: "Combines median household income (purchasing power) with trailing 1-yr home price appreciation (revealed demand strength). Together they measure whether the county has income-qualified buyers and whether those buyers are actively competing.",
+    why: "High income alone doesn't guarantee demand if locals are choosing to rent or leave. High HPA alone doesn't guarantee quality if it's driven by speculative activity. Together they confirm a healthy, income-backed ownership market.",
+    tiers: [
+      { range: "HHI > $75k AND HPA > 3%", label: "Strong Buyer Base", color: "#4ade80" },
+      { range: "HHI $55k–$75k or HPA 1–3%", label: "Solid", color: "#86efac" },
+      { range: "HHI $40k–$55k or HPA flat", label: "Marginal", color: "#fbbf24" },
+      { range: "HHI < $40k or declining HPA", label: "Weak", color: "#f87171" },
+    ],
+    weight: "Formation scoring: buyer quality weighted at ~20%",
+  },
+  // ── Engineered scorecard dimensions ──────────────────────────────────────
+  workforce: {
+    title: "Available Workforce",
+    subtitle: "Unemployment rate · labor force size",
+    what: "Combines the county unemployment rate with the labor force participation rate and total labor force size. Measures the depth and availability of workers for an incoming employer.",
+    why: "An employer-anchor strategy requires a large available workforce that can be hired at competitive wages. High unemployment signals idle labor; high LFPR signals workforce attachment. Together they define whether an employer can staff a facility from the local market.",
+    tiers: [
+      { range: "Unemployment > 5% + large labor pool", label: "Deep Available Pool", color: "#4ade80" },
+      { range: "Unemployment 3–5%", label: "Adequate", color: "#86efac" },
+      { range: "Unemployment 2–3%", label: "Tight", color: "#fbbf24" },
+      { range: "Unemployment < 2% or tiny labor pool", label: "Labor Constrained", color: "#f87171" },
+    ],
+    weight: "Engineered scoring: workforce weighted 25–40% depending on industry",
+  },
+  land_cost: {
+    title: "Land & Development Cost",
+    subtitle: "Farmland value per acre (USDA NASS)",
+    what: "Uses USDA NASS farmland value per acre as a proxy for raw industrial/commercial land cost. Lower values indicate available land at a basis that supports large-footprint industrial facilities.",
+    why: "Industrial and distribution facilities require large parcels (50–500+ acres). High land costs in suburban markets make large-footprint development economically unfeasible. Rural and exurban counties with low land basis offer the only viable sites for new industrial campus development.",
+    tiers: [
+      { range: "< $2,500/acre", label: "Prime Industrial Basis", color: "#4ade80" },
+      { range: "$2,500–$5,000/acre", label: "Viable", color: "#86efac" },
+      { range: "$5,000–$10,000/acre", label: "Expensive", color: "#fbbf24" },
+      { range: "> $10,000/acre", label: "Prohibitive", color: "#f87171" },
+    ],
+    weight: "Engineered scoring: land weighted 15–25% depending on industry",
+  },
+  infrastructure: {
+    title: "Infrastructure",
+    subtitle: "Broadband coverage · metro drive time",
+    what: "A composite of FCC broadband availability (% of addresses with ≥25 Mbps service) and Amazon Location Service drive time to the nearest metropolitan area. Broadband measures operational readiness; metro drive time measures talent access and supply chain connectivity.",
+    why: "Modern industrial and tech employers require reliable broadband for operations and remote management. Metro proximity determines whether the county can attract professional workers (tech, healthcare, management) who commute or relocate from larger cities.",
+    tiers: [
+      { range: "Broadband > 80% AND drive < 60 min", label: "Strong Infrastructure", color: "#4ade80" },
+      { range: "Broadband > 60% or drive < 90 min", label: "Adequate", color: "#86efac" },
+      { range: "Broadband 40–60% or drive 90–150 min", label: "Marginal", color: "#fbbf24" },
+      { range: "Broadband < 40% or drive > 150 min", label: "Infrastructure Gap", color: "#f87171" },
+    ],
+    weight: "Engineered scoring: infrastructure weighted 15–30% depending on industry",
+  },
+  growth_momentum: {
+    title: "Growth Momentum",
+    subtitle: "Population growth · employment growth",
+    what: "Combines population growth rate with YoY employment growth. Measures whether the county is already on a growth trajectory that an employer anchor would accelerate — versus a turnaround play.",
+    why: "Employers prefer locations showing organic momentum. A county already growing has proven infrastructure capacity, improving local services, and rising worker expectations — all positive. A purely distressed market may have structural issues that limit employer ROI.",
+    tiers: [
+      { range: "Pop > 1% AND employment > 2%", label: "Strong Momentum", color: "#4ade80" },
+      { range: "Either signal positive", label: "Mixed", color: "#86efac" },
+      { range: "Both near-flat", label: "Stagnant", color: "#fbbf24" },
+      { range: "Both declining", label: "Distressed", color: "#f87171" },
+    ],
+    weight: "Engineered scoring: growth signals weighted ~15%",
+  },
+  ap_absorption: {
+    title: "AP Absorption",
+    subtitle: "Home price-to-income ratio · worker affordability",
+    what: "Measures how affordable the local housing market is for the workers an employer would bring in. Uses the median home price-to-income ratio; lower ratios mean workers can afford to live near the facility, reducing attrition.",
+    why: "An employer-anchor generates housing demand. If homes are already unaffordable for the wage levels of incoming workers, employers face recruitment challenges and turnover. Counties with attainable housing can retain workers, making the employer's investment more durable.",
+    tiers: [
+      { range: "Price/income ratio < 3x", label: "Highly Attainable", color: "#4ade80" },
+      { range: "3x–4x", label: "Attainable", color: "#86efac" },
+      { range: "4x–5x", label: "Stretched", color: "#fbbf24" },
+      { range: "> 5x", label: "Unattainable", color: "#f87171" },
+    ],
+    weight: "Engineered scoring: absorption weighted ~10–15%",
+  },
+  // ── Key Metrics ───────────────────────────────────────────────────────────
+  home_value: {
+    title: "Median Home Value",
+    subtitle: "Zillow ZHVI — county-level",
+    what: "Zillow Home Value Index (ZHVI) for the county — a smoothed, seasonally adjusted estimate of the median home value. Updated monthly using repeat-sales methodology.",
+    why: "The absolute price level determines product positioning. Markets with median values under $250k support attainable MPC product targeting first-time and entry-level buyers. High-value markets ($500k+) require a luxury or move-up product strategy.",
+    tiers: [],
+    note: "Contextual metric — interpreted relative to local income (see Income Gap) rather than scored in isolation.",
+  },
+  median_hhi: {
+    title: "Median Household Income",
+    subtitle: "Census ACS 2022 5-Year Estimates",
+    what: "The income at the midpoint of the county's household income distribution, from the Census Bureau's American Community Survey 5-year estimates. Represents the purchasing power of the median buyer.",
+    why: "Income drives mortgage qualification. A county with $90k median HHI can support a much larger buyer pool than one at $45k for the same home price. Used directly to calculate buyer pool depth and the income gap signal.",
+    tiers: [],
+    note: "Contextual metric — primary input into buyer pool and affordability calculations.",
+  },
+  unemployment: {
+    title: "Unemployment Rate",
+    subtitle: "Census ACS 2022 — civilian labor force",
+    what: "Percentage of the civilian labor force actively seeking work but not employed, from Census ACS. Measured as a 5-year estimate to smooth annual volatility.",
+    why: "High unemployment can signal either a distressed market (risk) or an untapped labor pool (opportunity, particularly for Engineered Markets thesis). Context matters — combined with LFPR and employment growth, it determines whether unemployment represents structural distress or cyclical slack.",
+    tiers: [
+      { range: "< 3%", label: "Near Full Employment", color: "#fbbf24" },
+      { range: "3–5%", label: "Normal Range", color: "#86efac" },
+      { range: "5–8%", label: "Elevated — labor opportunity", color: "#4ade80" },
+      { range: "> 8%", label: "High — potential distress signal", color: "#f97316" },
+    ],
+    note: "Interpretation depends on thesis. High unemployment is negative for Activation/Expansion, positive for Engineered Markets.",
+  },
+  emp_growth_pct: {
+    title: "Employment Growth",
+    subtitle: "BLS QCEW — YoY covered employment",
+    what: "Year-over-year change in total covered employment (BLS Quarterly Census of Employment and Wages). Covered employment includes all workers subject to state unemployment insurance laws.",
+    why: "Employment growth is the most direct leading indicator of household formation. Job creation brings workers, workers form households, households need housing. This metric is a primary driver of formation, engineered, and expansion scores.",
+    tiers: [],
+    note: "Positive values indicate job gains; negative values indicate contraction.",
+  },
+  pop_density: {
+    title: "Population Density",
+    subtitle: "Persons per square mile — Census ACS",
+    what: "Total county population divided by land area in square miles. A key input into the greenfield feasibility assessment.",
+    why: "Low density (< 50 persons/mi²) indicates available undeveloped land. High density (> 500 persons/mi²) signals suburban/urban buildout where large contiguous parcels are rare or prohibitively priced. Density is a proxy for what kind of product strategy is viable.",
+    tiers: [
+      { range: "< 20/mi²", label: "Frontier / Rural — prime greenfield", color: "#4ade80" },
+      { range: "20–50/mi²", label: "Low density — viable greenfield", color: "#86efac" },
+      { range: "50–200/mi²", label: "Suburban fringe", color: "#fbbf24" },
+      { range: "> 200/mi²", label: "Dense — greenfield constrained", color: "#f87171" },
+    ],
+  },
+  land_value: {
+    title: "Land Value",
+    subtitle: "USDA NASS 2017 — farmland value per acre",
+    what: "Average farmland and ranch land value per acre from USDA's National Agricultural Statistics Service (NASS). Used as a proxy for raw land acquisition cost for large-footprint development.",
+    why: "Land cost is the primary constraint on developer margin for both MPC and industrial development. Markets with low land basis allow developers to acquire at a price that supports attainable pricing and still deliver target returns.",
+    tiers: [
+      { range: "< $2,000/acre", label: "Exceptional Basis", color: "#4ade80" },
+      { range: "$2,000–$5,000/acre", label: "Competitive", color: "#86efac" },
+      { range: "$5,000–$10,000/acre", label: "Elevated", color: "#fbbf24" },
+      { range: "> $10,000/acre", label: "High Basis Risk", color: "#f87171" },
+    ],
+  },
+  permits_1k: {
+    title: "Permit Activity",
+    subtitle: "Residential permit units per 1,000 population (Census 2022)",
+    what: "Annual residential building permits authorized per 1,000 county residents, from the Census Bureau's Building Permits Survey.",
+    why: "Permit activity reveals market confidence. High permit rates confirm that builders are betting on sustained demand. Very low activity may signal either supply constraints (protecting margins) or a hostile entitlement environment. A spike from zero to positive often signals a new master plan or utility extension.",
+    tiers: [
+      { range: "> 10 units/1k", label: "High Velocity", color: "#4ade80" },
+      { range: "5–10 units/1k", label: "Active", color: "#86efac" },
+      { range: "2–5 units/1k", label: "Moderate", color: "#fbbf24" },
+      { range: "< 2 units/1k", label: "Low Activity", color: "#f87171" },
+    ],
+  },
+  fema_risk: {
+    title: "FEMA Risk Score",
+    subtitle: "FEMA National Risk Index — composite hazard + exposure",
+    what: "FEMA's National Risk Index composite score combining 18 natural hazard types (flood, earthquake, wind, wildfire, etc.) weighted by the county's social vulnerability and community resilience. Higher scores indicate higher overall natural hazard risk.",
+    why: "Natural disaster risk affects insurance costs, financing availability, and long-term value stability. Markets with high FEMA risk scores face rising insurance premiums that erode buyer pool depth, and may lose GSE financing eligibility in extreme cases.",
+    tiers: [
+      { range: "Score 0–25", label: "Low Risk", color: "#4ade80" },
+      { range: "25–50", label: "Moderate", color: "#86efac" },
+      { range: "50–75", label: "Elevated", color: "#fbbf24" },
+      { range: "75–100", label: "High Risk", color: "#f87171" },
+    ],
+  },
+  // ── Affordability banner ──────────────────────────────────────────────────
+  affordability_lift_pts: {
+    title: "Buyer Pool Lift",
+    subtitle: "Percentage point increase in qualifying households",
+    what: "The difference in buyer pool depth between a conventional 3% down loan and an American Pledge 20% down loan, expressed in percentage points. A +14 lift means 14% more households qualify under AP than under conventional financing.",
+    why: "The AP program converts renters into buyers by providing the 20% down payment that most households cannot save. Each point of lift represents a meaningful expansion of the addressable buyer universe — directly increasing demand depth for participating markets.",
+    tiers: [],
+    note: "Higher lift indicates a market where the income-to-price ratio is favorable but down payment is the binding constraint — exactly the sweet spot for AP product.",
+  },
+  conv_pool: {
+    title: "Conventional Buyer Pool",
+    subtitle: "% of households qualifying at 3% down",
+    what: "Share of local households whose income supports a 3% down conventional mortgage on the median-priced home, using a 43% debt-to-income ratio and current market mortgage rates.",
+    why: "This is the baseline demand pool without American Pledge. It sets the floor for how deep the market is under standard financing conditions. Markets with thin conventional pools (<25%) have structurally constrained demand that requires down payment assistance to unlock.",
+    tiers: [
+      { range: "> 50%", label: "Deep", color: "#4ade80" },
+      { range: "40–50%", label: "Healthy", color: "#86efac" },
+      { range: "30–40%", label: "Moderate", color: "#fbbf24" },
+      { range: "20–30%", label: "Thin", color: "#f97316" },
+      { range: "< 20%", label: "Very Thin", color: "#f87171" },
+    ],
+  },
+  hpa_range: {
+    title: "Implied YoY HPA Range",
+    subtitle: "5-signal composite · estimated annual appreciation",
+    what: "A model-derived estimate of the county's likely home price appreciation (HPA) range over the next 12 months, expressed as a low-to-high band (e.g. +3–6%). Derived from the weighted composite of 5 signals: price momentum, buyer pool depth, income gap, demand momentum, and Kalshi-implied mortgage rate outlook.",
+    why: "A single HPA number is misleading — markets have uncertainty. The range communicates both direction and conviction. A tight +5–7% range signals high-confidence appreciation; a wide -2% to +4% range signals meaningful uncertainty. Use this alongside the signal cards to understand which factors are driving the outlook.",
+    tiers: [
+      { range: "Composite ≥ 0.70", label: "Bullish (+5%+ implied)", color: "#4ade80" },
+      { range: "Composite 0.55–0.70", label: "Mod. Bullish (+2–5%)", color: "#86efac" },
+      { range: "Composite 0.40–0.55", label: "Neutral (0–2%)", color: "#fbbf24" },
+      { range: "Composite 0.25–0.40", label: "Cautious (-1 to +1%)", color: "#f97316" },
+      { range: "Composite < 0.25", label: "Bearish (<0%)", color: "#f87171" },
+    ],
+    weight: "Composite of 5 signals: Price Momentum (25%), Buyer Pool (25%), Income Gap (20%), Demand Momentum (25%), Rate Outlook (5%)",
+  },
+  // ── Thesis meta cards (Market Intelligence panel) ────────────────────────
+  thesis_entry_activation: {
+    title: "Entry Strategy · Activation",
+    subtitle: "Distressed basis acquisition",
+    what: "The Activation thesis targets secondary and tertiary markets where severe economic distress has compressed home values well below replacement cost — creating acquisition opportunities at 30–60% below peak. Entry is typically through REO bulk purchases, note acquisitions, or direct seller transactions.",
+    why: "Distressed basis is the primary margin of safety in the Activation thesis. Buying at deep discount means even modest recovery produces strong returns, and downside is protected by the replacement cost floor. Markets where median home values are near or below construction cost represent the rarest and most durable entry opportunities.",
+    tiers: [],
+    note: "Key filter: markets where ZHVI is materially below estimated replacement cost AND economic distress indicators (poverty, unemployment, vacancy) are elevated.",
+  },
+  thesis_demand_activation: {
+    title: "Demand Driver · Activation",
+    subtitle: "Catalyst event · Federal awards",
+    what: "Activation markets depend on an identifiable catalyst to convert distressed basis into appreciation. Common catalysts include: federal CHIPS Act / IRA manufacturing awards, major employer announcements, Opportunity Zone capital deployment, HUD Choice Neighborhoods grants, or infrastructure investment.",
+    why: "Without a catalyst, distressed markets stay distressed. The investment thesis is to identify the catalyst BEFORE it's priced in — buying the distressed basis ahead of the announcement and holding through the demand expansion that follows. Federal award data (USASpending.gov) is a primary signal source.",
+    tiers: [],
+    note: "Catalyst Evidence is one of the top-weighted dimensions in Activation scoring. Markets with pending or recently announced federal awards score highest.",
+  },
+  thesis_ap_activation: {
+    title: "AP Role · Activation",
+    subtitle: "Buyer pool expansion",
+    what: "In Activation markets, American Pledge's primary role is buyer pool expansion — converting renters and non-qualified buyers into purchasers who can absorb the REO or distressed inventory being worked out. AP provides the 20% down payment contribution, eliminating PMI and reducing the monthly payment to qualification threshold.",
+    why: "Distressed markets have thin conventional buyer pools (often <20% of households qualify). AP can expand this to 30–45%, creating a functioning demand base that supports price recovery. Without demand-side intervention, even well-priced distressed inventory can sit unsold in structurally constrained markets.",
+    tiers: [],
+    note: "AP absorption is measured by the lift in qualifying buyer percentage between 3% down conventional and 20% down AP-assisted.",
+  },
+  thesis_hold_activation: {
+    title: "Target Hold · Activation",
+    subtitle: "3–5 year recovery timeline",
+    what: "Activation investments are typically held 3–5 years — long enough to capture the catalyst-driven recovery, but short enough to recycle capital before the market matures into a conventional appreciation play. Exit is through stabilized portfolio sale, individual retail sales, or securitization.",
+    why: "The 3–5 year window aligns with the typical catalyst absorption cycle. Federal investments (new factories, infrastructure) take 12–18 months to break ground and 24–36 months to generate employment — which then drives housing demand. Exiting at year 3–5 captures the appreciation without holding through the mature plateau.",
+    tiers: [],
+    note: "Hold period extends to 5+ years in markets where the catalyst is large-scale (e.g., semiconductor fab, military base expansion) and demand absorption continues.",
+  },
+  thesis_entry_expansion: {
+    title: "Entry Strategy · Expansion",
+    subtitle: "Metro-fringe greenfield MPC development",
+    what: "The Expansion thesis targets metro-adjacent counties where land is still available at attainable prices but confirmed household demand is arriving from the adjacent core. Entry is through raw land assembly on the metro fringe — acquiring contiguous parcels before the demand wave prices in.",
+    why: "Metro-fringe land captures the growth spillover from supply-constrained core markets. As core home prices rise, demand migrates outward — and developers who assembled land before the wave earn the highest margins. The key is identifying which outer ring is next to receive the migration.",
+    tiers: [],
+    note: "Metro Adjacency drive time (< 60 min to employment core) is the primary screen. Land basis under $5k/acre with confirmed household income support is the secondary filter.",
+  },
+  thesis_demand_expansion: {
+    title: "Demand Driver · Expansion",
+    subtitle: "Metro adjacency · Household income",
+    what: "Expansion demand is driven by affordability migration from supply-constrained core metros. Households earning $75k–$120k who are priced out of the core seek comparable quality of life within commutable distance. Median HHI and metro drive time are the two primary demand validators.",
+    why: "Unlike Activation (which needs an external catalyst), Expansion demand is organic and self-reinforcing. Once households start migrating, they attract retail, schools, and services — which attract more households. The key is arriving early enough to acquire at pre-migration land basis.",
+    tiers: [],
+    note: "School district quality and natural amenity scores are secondary demand drivers — these differentiate which metro-fringe counties actually attract families versus those that remain industrial.",
+  },
+  thesis_ap_expansion: {
+    title: "AP Role · Expansion",
+    subtitle: "Down payment program",
+    what: "In Expansion markets, American Pledge functions as a down payment program enabling first-time buyers and workforce households to enter new MPC communities. AP provides the 20% down payment, allowing buyers to skip the years of savings typically required and access better mortgage terms immediately.",
+    why: "New MPC communities target the $250k–$400k price range where buyer pools are moderate but down payment savings is the #1 barrier. AP directly removes this barrier, accelerating lot absorption and de-risking the developer's phase-by-phase capital deployment.",
+    tiers: [],
+    note: "AP contribution is typically structured as a silent second lien paid at sale, funded by a program trust. The buyer receives equity from day one.",
+  },
+  thesis_hold_expansion: {
+    title: "Target Hold · Expansion",
+    subtitle: "5–7 year land-to-vertical cycle",
+    what: "Expansion investments require a 5–7 year hold to capture the full value creation cycle: land assembly (year 0–1), entitlement (year 1–2), infrastructure (year 2–3), vertical construction and lot sales (year 3–7). The full community build-out typically spans multiple phases over this period.",
+    why: "The longer hold reflects the time required to convert raw land into a functioning community. Infrastructure investment (roads, utilities, amenity cores) takes 18–24 months to complete before vertical construction can begin, and absorption of 500+ lots typically takes 3–5 years.",
+    tiers: [],
+    note: "Returns are backend-loaded — early phase capital is largely consumed by land carry, entitlement, and infrastructure before lot sale revenue begins.",
+  },
+  thesis_entry_formation: {
+    title: "Entry Strategy · Formation",
+    subtitle: "Greenfield land assembly ahead of demographic wave",
+    what: "The Formation thesis is the purest greenfield play — assembling contiguous acreage in counties experiencing organic demographic momentum, before that momentum is reflected in land prices. Entry is through direct farmland and rural residential transactions at agricultural basis.",
+    why: "Formation markets are where the demographic wave is forming, not yet arrived. Counties with 1–2% annual population growth, positive net migration, and income-qualified households represent the next tier of MPC opportunity. The window to acquire at agricultural basis closes once the first builder breaks ground.",
+    tiers: [],
+    note: "Low population density (<50/mi²) combined with strong demographic momentum is the core Formation screen. It separates 'still rural' from 'filling in fast'.",
+  },
+  thesis_demand_formation: {
+    title: "Demand Driver · Formation",
+    subtitle: "In-migration · Population growth",
+    what: "Formation demand is purely organic — households forming naturally through births, marriages, and workforce transitions, combined with net in-migration of households seeking affordable single-family homeownership. No employer anchor or external catalyst is required.",
+    why: "The Formation thesis bets on long-term demographic inevitability. Counties with strong demographic momentum will need housing — the only question is who owns the land when the development wave arrives. In-migration is a more forward-looking signal than population growth alone, as it captures households making active relocation decisions.",
+    tiers: [],
+    note: "Census ACS migration data (domestic + international) and USPS vacancy data are the primary signals. Strong in-migration with low current housing permits signals an undersupplied formation market.",
+  },
+  thesis_ap_formation: {
+    title: "AP Role · Formation",
+    subtitle: "MPC buyer engine",
+    what: "In Formation markets, American Pledge serves as the primary demand engine for new MPC communities — providing the down payment to first-time and workforce buyers who represent the core demographic of greenfield communities. AP's consistent presence across phases provides absorption predictability.",
+    why: "Greenfield MPC success depends on phased absorption — each phase must sell through before the next phase launches. AP creates a reliable, programmatic buyer pool that de-risks phase launches and provides lenders with absorption confidence. Without AP or equivalent assistance, greenfield MPCs in new markets often stall in early phases.",
+    tiers: [],
+    note: "AP programs in Formation markets typically target households at 80–120% of Area Median Income — the workforce buyer segment that forms households fastest but struggles most with down payment.",
+  },
+  thesis_hold_formation: {
+    title: "Target Hold · Formation",
+    subtitle: "7–10 year community build-out",
+    what: "Formation investments require the longest hold — 7–10 years — to capture the full value creation from raw land through entitled community through fully built and amenitized MPC. Returns are highly back-loaded, with land carry costs dominating early years.",
+    why: "The extended hold reflects the scale and complexity of true greenfield community development. Large-scale Formation MPCs (1,000+ lots) require significant infrastructure investment, multi-phase entitlement, and years of absorption before the community amenity premium is fully realized.",
+    tiers: [],
+    note: "Formation investments are typically structured as long-duration closed-end funds or JV structures with patient institutional capital. Institutional partners with 7–12 year mandates are the natural match.",
+  },
+  thesis_entry_engineered: {
+    title: "Entry Strategy · Engineered Markets",
+    subtitle: "Pre-announcement land assembly",
+    what: "The Engineered Markets thesis involves acquiring industrial-scale land parcels before an employer anchor is publicly announced. Entry relies on site selection intelligence — identifying which counties an industrial employer is likely to choose based on workforce data, infrastructure, and incentive package — and assembling the adjacent residential land before the announcement.",
+    why: "Industrial employer announcements (e.g., $1B semiconductor fab, $500M logistics hub) immediately create housing demand that drives land prices up 2–5x in the surrounding area. Developers who assembled residential land at pre-announcement agricultural basis capture the entire appreciation spike.",
+    tiers: [],
+    note: "Execution risk is high — pre-announcement land requires conviction in site selection analysis. Position sizing should reflect the speculative premium relative to agricultural basis.",
+  },
+  thesis_demand_engineered: {
+    title: "Demand Driver · Engineered Markets",
+    subtitle: "Employer workforce demand",
+    what: "Unlike the other three theses (which rely on organic or migration-driven demand), Engineered Markets demand is manufactured — created by a specific employer anchor that brings hundreds or thousands of workers into the county. The employer generates the housing demand that didn't previously exist.",
+    why: "Employer-anchored demand is highly concentrated and predictable — you know roughly how many workers are coming, at what wage level, and over what timeline. This makes demand projection more reliable than organic or migration models. The risk is employer-specific concentration, not market-wide uncertainty.",
+    tiers: [],
+    note: "Key inputs: announced employment count, wage level, construction timeline, and estimated housing demand per worker household (typically 0.5–0.8x total employment).",
+  },
+  thesis_ap_engineered: {
+    title: "AP Role · Engineered Markets",
+    subtitle: "Workforce housing engine",
+    what: "In Engineered Markets, American Pledge functions as a workforce housing engine — providing down payment assistance to the workers an employer anchor brings into the county. Many manufacturing, logistics, and healthcare workers earn $45k–$80k and cannot save a conventional down payment within the relocation timeline.",
+    why: "Employers actively partner with housing providers that can guarantee attainable housing for incoming workers. AP creates a programmatic housing solution that employers can advertise in their recruitment packages — making AP-affiliated communities a preferred relocation destination for workforce hiring.",
+    tiers: [],
+    note: "Wage level of the anchor employer directly drives AP program design — entry-level wages ($35k–$50k) require deeper subsidy than professional wages ($80k+). Scoring adjusts the workforce dimension weighting accordingly.",
+  },
+  thesis_hold_engineered: {
+    title: "Target Hold · Engineered Markets",
+    subtitle: "10–15 year community maturation",
+    what: "Engineered Markets require the longest hold of all four theses — 10–15 years — to allow the employer anchor to fully staff, the housing community to build out, and the local services ecosystem (retail, schools, healthcare) to mature around the new employment base.",
+    why: "The value creation cycle in Engineered Markets is the longest because it depends on an employer's multi-year staffing ramp, followed by a housing absorption period, followed by a community amenity maturation period before the market develops organic appreciation independent of the anchor employer.",
+    tiers: [],
+    note: "Exit strategies in Engineered Markets typically include portfolio sale to institutional investors seeking stabilized workforce housing cash flow, or community land trust structures that provide long-term affordability.",
+  },
+  ap_pool: {
+    title: "American Pledge Buyer Pool",
+    subtitle: "% of households qualifying at 20% down (AP-assisted)",
+    what: "Share of local households whose income supports a 20% down mortgage (zero PMI) when American Pledge provides the down payment contribution. Calculated at the same 43% DTI threshold, using the lower monthly payment from eliminating PMI.",
+    why: "The AP program's core value proposition: by front-loading the 20% down payment, buyers eliminate PMI (~$150–$350/month) and access better mortgage terms. This reduces the monthly payment sufficiently to qualify households that couldn't qualify at 3% down with PMI.",
+    tiers: [
+      { range: "> 60%", label: "Very Deep AP Market", color: "#4ade80" },
+      { range: "50–60%", label: "Strong", color: "#86efac" },
+      { range: "40–50%", label: "Good", color: "#fbbf24" },
+      { range: "< 40%", label: "Limited AP Lift", color: "#f97316" },
+    ],
+  },
+};
+
+// ─── Metric Info Modal ────────────────────────────────────────────────────────
+const MetricInfoModal = ({ metricKey, onClose }) => {
+  const info = metricKey ? METRIC_INFO[metricKey] : null;
+  if (!info) return null;
+  return (
+    <Dialog open={!!metricKey} onClose={onClose} maxWidth="sm" fullWidth
+      PaperProps={{ sx: { borderRadius: 2, background: "#0d1b2a", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 24px 48px rgba(0,0,0,0.6)" } }}>
+      <Box sx={{ px: 3, pt: 2.5, pb: 1, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+        <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 2 }}>
+          <Box>
+            <Typography sx={{ fontSize: 15, fontWeight: 800, color: "#fff", letterSpacing: "-0.01em" }}>{info.title}</Typography>
+            {info.subtitle && <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.45)", mt: 0.25, fontStyle: "italic" }}>{info.subtitle}</Typography>}
+          </Box>
+          <Box component="button" onClick={onClose} sx={{ background: "transparent", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.4)", fontSize: 18, lineHeight: 1, p: 0, mt: 0.25, "&:hover": { color: "#fff" } }}>✕</Box>
+        </Box>
+      </Box>
+      <DialogContent sx={{ px: 3, py: 2 }}>
+        <Box sx={{ mb: 2 }}>
+          <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.1em", mb: 0.5 }}>What it measures</Typography>
+          <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.8)", lineHeight: 1.65 }}>{info.what}</Typography>
+        </Box>
+        <Box sx={{ mb: 2 }}>
+          <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.1em", mb: 0.5 }}>Why it matters</Typography>
+          <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.8)", lineHeight: 1.65 }}>{info.why}</Typography>
+        </Box>
+        {info.tiers?.length > 0 && (
+          <Box sx={{ mb: 1.5 }}>
+            <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.1em", mb: 0.75 }}>Scoring tiers</Typography>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+              {info.tiers.map((t) => (
+                <Box key={t.range} sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+                  <Box sx={{ width: 8, height: 8, borderRadius: "50%", background: t.color, flexShrink: 0 }} />
+                  <Typography sx={{ fontSize: 11, color: t.color, fontWeight: 700, minWidth: 120 }}>{t.label}</Typography>
+                  <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.45)" }}>{t.range}</Typography>
+                </Box>
+              ))}
+            </Box>
+          </Box>
+        )}
+        {(info.weight || info.note) && (
+          <Box sx={{ mt: 1.5, pt: 1.5, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+            {info.weight && <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.35)", fontStyle: "italic" }}>{info.weight}</Typography>}
+            {info.note && <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.35)", fontStyle: "italic", mt: info.weight ? 0.25 : 0 }}>{info.note}</Typography>}
+          </Box>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+};
+
 // ─── Per-Market HPA Outlook Model ────────────────────────────────────────────
 // Produces a composite directional price outlook from 5 signals:
 //   1. Price momentum   (zhvi_growth_1yr)               weight 25%
@@ -210,15 +762,15 @@ const _hpaOutlook = (met, kalshiMtgMedian = null) => {
       detail: "1-yr ZHVI appreciation" });
   }
 
-  // Signal 2: Buyer Pool Depth — uses 10% down (typical conventional buyer, ~NAR median)
+  // Signal 2: Buyer Pool Depth — 3% down is the standard conventional entry point (Fannie/Freddie)
   if (met.zhvi_latest && met.median_hhi) {
-    const pool = _buyerPoolPct(met.zhvi_latest, met.median_hhi, 0.10);
+    const pool = _buyerPoolPct(met.zhvi_latest, met.median_hhi, 0.03);
     if (pool != null) {
       const s = pool > 40 ? 1.0 : pool > 30 ? 0.75 : pool > 20 ? 0.5 : pool > 12 ? 0.25 : 0.0;
       scores.push({ key: "buyer_pool", weight: 0.25, score: s,
         label: "Buyer Pool",
         value: `${pool.toFixed(0)}%`,
-        detail: "of HH qualify (10% down, conv.)" });
+        detail: "of HH qualify (3% down, conv.)" });
     }
   }
 
@@ -368,61 +920,88 @@ const _formationScore = (met) => {
 // Site optimizer for employer-first land acquisition: which counties provide the
 // best foundation for a designed demand ecosystem (employer + AP housing + MPC).
 // Weights shift based on employer profile input (industry, workforce size, wages).
+// Industry-keyed base weights — each industry type emphasizes different site factors.
+// landPriority flag bumps land weight +5% (capped at 30%) and trims workforce accordingly.
+const _ENG_INDUSTRY_WEIGHTS = {
+  manufacturing: { workforce: 0.35, land: 0.25, infra: 0.15, momentum: 0.15, absorption: 0.10 },
+  logistics:     { workforce: 0.25, land: 0.20, infra: 0.30, momentum: 0.15, absorption: 0.10 },
+  tech:          { workforce: 0.35, land: 0.10, infra: 0.30, momentum: 0.15, absorption: 0.10 },
+  healthcare:    { workforce: 0.40, land: 0.10, infra: 0.20, momentum: 0.15, absorption: 0.15 },
+  mixed:         { workforce: 0.30, land: 0.20, infra: 0.20, momentum: 0.15, absorption: 0.15 },
+};
+
 const _engineeredScore = (met, profile = {}) => {
   if (!met) return null;
   const { industry = "manufacturing", wageLevel = "moderate", landPriority = true } = profile;
 
-  // Weight multipliers based on profile
-  const isIndustrial = industry === "manufacturing" || industry === "logistics";
-  const isTech       = industry === "tech";
+  const baseW = _ENG_INDUSTRY_WEIGHTS[industry] || _ENG_INDUSTRY_WEIGHTS.manufacturing;
+
+  // Land cost priority: +5% to land weight, rebalanced from workforce
+  const landW      = landPriority ? Math.min(0.30, baseW.land + 0.05) : Math.max(0.05, baseW.land - 0.05);
+  const landDelta  = landW - baseW.land;
+  const workforceW = Math.max(0.05, baseW.workforce - landDelta);
+
+  // Infrastructure broadband/metro sub-weights by industry
+  // Tech: broadband-heavy (remote worker talent); Logistics: metro-heavy (freight/access)
+  const infraBbW  = industry === "tech" ? 0.65 : industry === "logistics" ? 0.35 : 0.50;
+  const infraMetW = 1 - infraBbW;
 
   const dims = [];
 
-  // 1. Available Workforce (30%) — unemployed + broader labor pool
+  // 1. Available Workforce — scoring logic inverts for professional wage tier
+  //    entry-level:   high unemployment = abundant cheap labor = GOOD
+  //    professional:  low unemployment = skilled workers already employed there = GOOD (inverted)
+  //    Blending ratio: entry 70/30 unemp/LFPR, moderate 60/40, professional 30/70
   {
-    const unemp = met.unemployment_rate; // % — higher = more available labor
-    const lfpr  = met.lfpr;              // % — total workforce participation
-    const totEmp = met.total_employment; // scale signal
+    const unemp  = met.unemployment_rate;
+    const lfpr   = met.lfpr;
+    const totEmp = met.total_employment;
     if (unemp != null || lfpr != null) {
-      const uS = unemp != null ? (unemp > 8 ? 1.0 : unemp > 5 ? 0.75 : unemp > 3.5 ? 0.5 : unemp > 2.5 ? 0.3 : 0.1) : 0.5;
-      const lS = lfpr  != null ? (lfpr  > 65 ? 1.0 : lfpr  > 60 ? 0.75 : lfpr  > 55 ? 0.5 : 0.25) : 0.5;
-      const s = unemp != null && lfpr != null ? (uS * 0.6 + lS * 0.4) : unemp != null ? uS : lS;
-      dims.push({ id: "workforce", label: "Available Workforce", weight: 0.30, score: s,
+      const rawUnempScore = (u) => (u > 8 ? 1.0 : u > 5 ? 0.75 : u > 3.5 ? 0.5 : u > 2.5 ? 0.3 : 0.1);
+      const lfprScore     = (l) => (l > 65 ? 1.0 : l > 60 ? 0.75 : l > 55 ? 0.5 : 0.25);
+      let uS = unemp != null ? rawUnempScore(unemp) : 0.5;
+      let lS = lfpr  != null ? lfprScore(lfpr)      : 0.5;
+      // Professional: tight labor market is a positive signal (invert unemployment score)
+      if (wageLevel === "professional" && unemp != null) uS = 1.0 - rawUnempScore(unemp);
+      const unempRatio = wageLevel === "entry" ? 0.70 : wageLevel === "professional" ? 0.30 : 0.60;
+      const s = unemp != null && lfpr != null
+        ? (uS * unempRatio + lS * (1 - unempRatio))
+        : unemp != null ? uS : lS;
+      dims.push({ id: "workforce", label: "Available Workforce", weight: workforceW, score: s,
         value: unemp != null ? `${unemp.toFixed(1)}% unemp` : `${lfpr?.toFixed(1)}% LFPR`,
         detail: [unemp != null ? `${unemp.toFixed(1)}% unemployed` : null, lfpr != null ? `${lfpr.toFixed(1)}% LFPR` : null, totEmp != null ? `${(totEmp / 1000).toFixed(0)}k jobs` : null].filter(Boolean).join(" · ") });
     }
   }
 
-  // 2. Land & Development Cost (25%) — critical for site assembly
+  // 2. Land & Development Cost — weight varies by industry + landPriority toggle
   {
-    const land  = met.farmland_value_acre;  // $/acre
-    const dens  = met.pop_density;          // lower = more available
-    const zhvi  = met.zhvi_latest;          // home price proxy for land premium
+    const land = met.farmland_value_acre;
+    const dens = met.pop_density;
     if (land != null || dens != null) {
       const lS = land != null ? (land < 2000 ? 1.0 : land < 4000 ? 0.78 : land < 8000 ? 0.5 : land < 15000 ? 0.25 : 0.05) : 0.5;
       const dS = dens != null ? (dens < 30 ? 1.0 : dens < 80 ? 0.8 : dens < 200 ? 0.55 : dens < 600 ? 0.25 : 0.0) : 0.5;
       const s = (lS + dS) / 2;
-      dims.push({ id: "land_cost", label: "Land & Dev Cost", weight: landPriority ? 0.25 : 0.15, score: s,
+      dims.push({ id: "land_cost", label: "Land & Dev Cost", weight: landW, score: s,
         value: land != null ? `$${(land / 1000).toFixed(1)}k/ac` : `${dens?.toFixed(0)} /sq mi`,
         detail: [land != null ? `$${(land / 1000).toFixed(1)}k/ac` : null, dens != null ? `${dens.toFixed(0)} pop/sq mi` : null].filter(Boolean).join(" · ") });
     }
   }
 
-  // 3. Infrastructure Readiness (20%) — broadband + metro connectivity (not too remote)
+  // 3. Infrastructure Readiness — broadband/metro sub-weights shift by industry
   {
-    const bb   = met.broadband_pct;          // % coverage
-    const dist = met.drive_min_nearest_metro; // minutes — sweet spot 30–90
+    const bb   = met.broadband_pct;
+    const dist = met.drive_min_nearest_metro;
     if (bb != null || dist != null) {
       const bbS   = bb   != null ? (bb   > 90 ? 1.0 : bb   > 75 ? 0.75 : bb   > 60 ? 0.45 : 0.15) : 0.5;
       const distS = dist != null ? (dist < 30 ? 0.8 : dist < 60 ? 1.0 : dist < 90 ? 0.75 : dist < 120 ? 0.45 : 0.15) : 0.5;
-      const s = bb != null && dist != null ? (bbS * 0.5 + distS * 0.5) : bb != null ? bbS : distS;
-      dims.push({ id: "infrastructure", label: "Infrastructure", weight: 0.20, score: s,
+      const s = bb != null && dist != null ? (bbS * infraBbW + distS * infraMetW) : bb != null ? bbS : distS;
+      dims.push({ id: "infrastructure", label: "Infrastructure", weight: baseW.infra, score: s,
         value: dist != null ? `${dist.toFixed(0)} min metro` : `${bb?.toFixed(0)}% BB`,
         detail: [bb != null ? `${bb.toFixed(0)}% broadband` : null, dist != null ? `${dist.toFixed(0)} min to metro` : null].filter(Boolean).join(" · ") });
     }
   }
 
-  // 4. Growth Momentum (15%) — market heading the right direction
+  // 4. Growth Momentum — same logic across industry types
   {
     const pg = met.pop_growth_pct;
     const eg = met.emp_growth_pct;
@@ -430,20 +1009,20 @@ const _engineeredScore = (met, profile = {}) => {
       const pgS = pg != null ? (pg > 2 ? 1.0 : pg > 0.5 ? 0.7 : pg > 0 ? 0.4 : 0.1) : 0.5;
       const egS = eg != null ? (eg > 3 ? 1.0 : eg > 1 ? 0.7 : eg > 0 ? 0.4 : 0.1) : 0.5;
       const s = pg != null && eg != null ? (pgS + egS) / 2 : pg != null ? pgS : egS;
-      dims.push({ id: "growth_momentum", label: "Growth Momentum", weight: 0.15, score: s,
+      dims.push({ id: "growth_momentum", label: "Growth Momentum", weight: baseW.momentum, score: s,
         value: pg != null ? `${pg >= 0 ? "+" : ""}${pg.toFixed(1)}% pop` : `${eg >= 0 ? "+" : ""}${eg?.toFixed(1)}% emp`,
         detail: [pg != null ? `${pg.toFixed(1)}% pop growth` : null, eg != null ? `${eg.toFixed(1)}% emp growth` : null].filter(Boolean).join(" · ") });
     }
   }
 
-  // 5. AP Housing Absorption (10%) — can American Pledge program deploy here?
+  // 5. AP Housing Absorption — healthcare slightly higher weight (workforce housing critical)
   {
-    const hhi   = met.median_hhi;
-    const zhvi  = met.zhvi_latest;
+    const hhi  = met.median_hhi;
+    const zhvi = met.zhvi_latest;
     if (hhi != null && zhvi != null) {
       const pool = _buyerPoolPct ? _buyerPoolPct(zhvi, hhi, 0.20) : null;
       const s = pool != null ? (pool > 35 ? 1.0 : pool > 25 ? 0.75 : pool > 15 ? 0.5 : pool > 8 ? 0.25 : 0.05) : 0.5;
-      dims.push({ id: "ap_absorption", label: "AP Absorption", weight: 0.10, score: s,
+      dims.push({ id: "ap_absorption", label: "AP Absorption", weight: baseW.absorption, score: s,
         value: pool != null ? `${pool.toFixed(0)}% qualify` : `$${(hhi / 1000).toFixed(0)}k HHI`,
         detail: pool != null ? `${pool.toFixed(0)}% of HH qualify at 20% down` : `$${(hhi / 1000).toFixed(0)}k median HHI` });
     }
@@ -1294,6 +1873,45 @@ const kalshiSummary = (tiles) => {
 
 // ─── County Choropleth Map ─────────────────────────────────────────────────
 const GEO_URL = "https://cdn.jsdelivr.net/npm/us-atlas@3/counties-10m.json";
+// Connecticut switched from 8 counties to 9 Planning Regions in 2022 (FIPS 09110–09190).
+// The us-atlas@3 topology still has the old county shapes (09001–09015) which don't match
+// the data. We overlay the new boundaries from the us-atlas GitHub main branch (updated 2023)
+// and skip old CT shapes in the base layer.
+// Census TIGERweb REST API — CT county-equivalents layer (planning regions 09110–09190)
+// Using the live REST API instead of static GENZ files which are no longer reliably hosted.
+const CT_PLANNING_URL =
+  "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/State_County/MapServer/13/query" +
+  "?where=STATE%3D%2709%27&outFields=GEOID%2CNAME&f=geojson&outSR=4326";
+
+// ArcGIS REST APIs return polygon rings in clockwise order, but GeoJSON spec (and d3-geo)
+// requires exterior rings to be counterclockwise. Without this fix, d3 renders the polygon
+// as the complement of the shape — filling everything EXCEPT the feature area.
+function _signedArea(ring) {
+  let a = 0;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    a += (ring[j][0] + ring[i][0]) * (ring[j][1] - ring[i][1]);
+  }
+  return a / 2;
+}
+function _fixGeoJsonWinding(feature) {
+  if (!feature?.geometry) return feature;
+  const fixPoly = (rings) =>
+    rings.map((ring, i) => {
+      const ccw = _signedArea(ring) > 0;
+      const wantCcw = i === 0; // exterior ring should be CCW; holes should be CW
+      return ccw === wantCcw ? ring : [...ring].reverse();
+    });
+  const { type, coordinates } = feature.geometry;
+  const fixed =
+    type === "Polygon" ? fixPoly(coordinates) :
+    type === "MultiPolygon" ? coordinates.map(fixPoly) :
+    coordinates;
+  return { ...feature, geometry: { ...feature.geometry, coordinates: fixed } };
+}
+// Old CT county FIPS to suppress in the base layer
+const CT_OLD_FIPS = new Set(["09001","09003","09005","09007","09009","09011","09013","09015"]);
+const NOOP = () => {};
+const US_MAP_CENTER = [-96, 38];
 
 // Tier-based discrete fills — lead markets pop amber, gradient fades to grey
 const TIER_FILL = {
@@ -1317,14 +1935,16 @@ const CountyMap = React.memo(
     const [topoData, setTopoData] = React.useState(null);
     const [centroidMap, setCentroidMap] = React.useState({});
     const [userZoom, setUserZoom] = React.useState(1);
+    const [zoomCenter, setZoomCenter] = React.useState(externalCenter || [-96, 38]);
 
-    // Reset userZoom when external center changes (search navigation)
+    // Reset userZoom and zoomCenter when external center changes (search navigation)
     React.useEffect(() => {
       setUserZoom(1);
+      setZoomCenter(externalCenter || [-96, 38]);
     }, [externalCenter]);
 
     const effectiveZoom = (externalZoom || 1) * userZoom;
-    const effectiveCenter = externalCenter || [-96, 38];
+    const effectiveCenter = zoomCenter;
 
     // Refs so handlers always have the latest values without invalidating memoized JSX
     const onSelectRef = React.useRef(onSelect);
@@ -1341,6 +1961,8 @@ const CountyMap = React.memo(
         });
       return m;
     }, [counties]);
+
+    const [ctGeo, setCtGeo] = React.useState(null);
 
     React.useEffect(() => {
       fetch(GEO_URL)
@@ -1367,16 +1989,59 @@ const CountyMap = React.memo(
           if (onCentroidReady) onCentroidReady(cmap);
         })
         .catch(() => {});
+
+      // Fetch CT planning region boundaries — Census 2022 GeoJSON (WGS84, FeatureCollection)
+      // Contains the 9 planning regions that replaced old CT counties in 2022 (FIPS 09110–09190)
+      fetch(CT_PLANNING_URL)
+        .then((r) => r.json())
+        .then((data) => {
+          const ctFeatures = (data.features || []).filter(
+            (f) => f.properties?.GEOID && parseInt(f.properties.GEOID, 10) >= 9110
+          );
+          if (!ctFeatures.length) return;
+          const ctFixed = ctFeatures.map(_fixGeoJsonWinding);
+          setCtGeo({ type: "FeatureCollection", features: ctFixed });
+          // Add CT planning region centroids to the shared centroid map
+          const cmap = {};
+          ctFeatures.forEach((f) => {
+            const fips = f.properties?.GEOID;
+            if (!fips || !f.geometry) return;
+            try {
+              const coords = [];
+              const collect = (arr) => {
+                if (typeof arr[0] === "number") coords.push(arr);
+                else arr.forEach(collect);
+              };
+              collect(f.geometry.coordinates);
+              if (coords.length) {
+                cmap[fips] = [
+                  coords.reduce((s, c) => s + c[0], 0) / coords.length,
+                  coords.reduce((s, c) => s + c[1], 0) / coords.length,
+                ];
+              }
+            } catch {}
+          });
+          if (Object.keys(cmap).length) {
+            setCentroidMap((prev) => {
+              const merged = { ...prev, ...cmap };
+              if (onCentroidReady) onCentroidReady(merged);
+              return merged;
+            });
+          }
+        })
+        .catch(() => {});
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Memoized base layer — only recomputes when topoData or fipsMap changes (once after load).
     // selectedFips is intentionally excluded: the pin marker handles selection, not polygon fills.
+    // Old CT county FIPS (09001–09015) are skipped — replaced by CT planning region overlay.
     const baseLayer = React.useMemo(
       () => (
         <Geographies geography={topoData || GEO_URL}>
           {({ geographies }) =>
             geographies.map((geo) => {
               const fips = geo.id;
+              if (CT_OLD_FIPS.has(fips)) return null; // suppressed — CT planning regions overlay below
               const county = fipsMap[fips];
               const fill = county?.tier
                 ? (TIER_FILL[county.tier] ?? "#dde3ea")
@@ -1431,87 +2096,171 @@ const CountyMap = React.memo(
     const selCentroid = selectedFips ? centroidMap[selectedFips] : null;
 
     return (
+      // Padding-bottom trick: gives the box an explicit height = 75% of its width
+      // (geoAlbersUsa 800×600 ≈ 4:3). All children are position:absolute and fill it.
+      // This means overflow:hidden and absolute legend always stay within bounds.
       <Box
         sx={{
           position: "relative",
           background: "#f5f7fa",
           borderRadius: 1,
           overflow: "hidden",
+          paddingBottom: "62.5%", // 500/800 — leaves a bit less than 4:3 so map isn't too tall
+          height: 0,              // height:0 + paddingBottom gives intrinsic height
         }}
       >
         {/* Zoom controls */}
-        <Box
-          sx={{
-            position: "absolute",
-            top: 6,
-            left: 8,
-            zIndex: 10,
-            display: "flex",
-            gap: 0.5,
-          }}
-        >
-          {[
-            ["+", () => setUserZoom((z) => Math.min(z * 1.6, 20))],
-            ["−", () => setUserZoom((z) => Math.max(z / 1.6, 0.5))],
-            ["⊙", () => setUserZoom(1)],
-          ].map(([label, fn]) => (
-            <button
-              key={label}
-              onClick={fn}
-              style={{
-                width: 22,
-                height: 22,
-                fontSize: 12,
-                fontWeight: 700,
-                border: "1px solid rgba(0,0,0,0.15)",
-                borderRadius: 3,
-                background: "rgba(255,255,255,0.85)",
-                cursor: "pointer",
-                fontFamily: "'Inter',sans-serif",
-                lineHeight: 1,
-                padding: 0,
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </Box>
-
-        <ComposableMap
-          projection="geoAlbersUsa"
-          style={{ width: "100%", height: "auto" }}
-          projectionConfig={{ scale: 900 }}
-        >
-          <ZoomableGroup
-            center={effectiveCenter}
-            zoom={effectiveZoom}
-            minZoom={1}
-            maxZoom={40}
+          <Box
+            sx={{
+              position: "absolute",
+              top: 6,
+              left: 8,
+              zIndex: 10,
+              display: "flex",
+              gap: 0.5,
+            }}
           >
-            {baseLayer}
+            {[
+              ["+", () => {
+                if (selCentroid) setZoomCenter(selCentroid);
+                setUserZoom((z) => Math.min(z * 1.6, 20));
+              }],
+              ["−", () => setUserZoom((z) => Math.max(z / 1.6, 0.5))],
+              ["⊙", () => { setUserZoom(1); setZoomCenter(externalCenter || [-96, 38]); }],
+            ].map(([label, fn]) => (
+              <button
+                key={label}
+                onClick={fn}
+                style={{
+                  width: 22,
+                  height: 22,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  border: "1px solid rgba(0,0,0,0.15)",
+                  borderRadius: 3,
+                  background: "rgba(255,255,255,0.85)",
+                  cursor: "pointer",
+                  fontFamily: "'Inter',sans-serif",
+                  lineHeight: 1,
+                  padding: 0,
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </Box>
 
-            {/* Pin marker — only this re-renders on selection change */}
-            {selCentroid && (
-              <Marker coordinates={selCentroid}>
-                <circle
-                  r={5 / effectiveZoom}
-                  fill="#f97316"
-                  stroke="#fff"
-                  strokeWidth={1.5 / effectiveZoom}
-                />
-                <circle
-                  r={9 / effectiveZoom}
-                  fill="none"
-                  stroke="#f97316"
-                  strokeWidth={1 / effectiveZoom}
-                  opacity={0.5}
-                />
-              </Marker>
-            )}
-          </ZoomableGroup>
-        </ComposableMap>
+          <ComposableMap
+            projection="geoAlbersUsa"
+            style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%" }}
+            projectionConfig={{ scale: 900 }}
+          >
+            <ZoomableGroup
+              center={effectiveCenter}
+              zoom={effectiveZoom}
+              minZoom={1}
+              maxZoom={40}
+            >
+              {baseLayer}
 
-        {/* Tooltip */}
+              {/* CT Planning Region overlay — replaces old CT county shapes */}
+              {ctGeo && (
+                <Geographies geography={ctGeo}>
+                  {({ geographies }) =>
+                    geographies.map((geo) => {
+                      const fips = geo.properties?.GEOID;
+                      const county = fips ? fipsMap[fips] : null;
+                      const fill = county?.tier ? (TIER_FILL[county.tier] ?? "#dde3ea") : "#dde3ea";
+                      const hoverFill = county ? "#f59e0b" : fill;
+                      return (
+                        <Geography
+                          key={`ct-${fips}`}
+                          geography={geo}
+                          fill={fill}
+                          stroke="#fff"
+                          strokeWidth={0.4}
+                          style={{
+                            default: { outline: "none" },
+                            hover: { outline: "none", fill: hoverFill, cursor: county ? "pointer" : "default" },
+                            pressed: { outline: "none" },
+                          }}
+                          onClick={() => { if (county && fips) onSelectRef.current(fips, county); }}
+                          onMouseEnter={(evt) => {
+                            if (!county) return;
+                            setTooltipRef.current({ name: county.name, state: county.state, composite: county.composite, tier: county.tier, rank: county.rank, x: evt.clientX, y: evt.clientY });
+                          }}
+                          onMouseMove={(evt) => { setTooltipRef.current((t) => t ? { ...t, x: evt.clientX, y: evt.clientY } : null); }}
+                          onMouseLeave={() => setTooltipRef.current(null)}
+                        />
+                      );
+                    })
+                  }
+                </Geographies>
+              )}
+
+              {/* Pin marker — only this re-renders on selection change */}
+              {selCentroid && (
+                <Marker coordinates={selCentroid}>
+                  <circle
+                    r={5 / effectiveZoom}
+                    fill="#f97316"
+                    stroke="#fff"
+                    strokeWidth={1.5 / effectiveZoom}
+                  />
+                  <circle
+                    r={9 / effectiveZoom}
+                    fill="none"
+                    stroke="#f97316"
+                    strokeWidth={1 / effectiveZoom}
+                    opacity={0.5}
+                  />
+                </Marker>
+              )}
+            </ZoomableGroup>
+          </ComposableMap>
+
+          {/* Legend — overlaid at bottom-right inside the SVG area */}
+          <Box
+            sx={{
+              position: "absolute",
+              bottom: 8,
+              right: 10,
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 1.5,
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+          >
+            {[
+              ["Lead Market", TIER_FILL.lead_market],
+              ["Priority", TIER_FILL.priority_market],
+              ["Watchlist", TIER_FILL.watchlist],
+              ["Deprioritized", TIER_FILL.deprioritized],
+            ].map(([label, color]) => (
+              <Box
+                key={label}
+                sx={{ display: "flex", alignItems: "center", gap: 0.5 }}
+              >
+                <Typography sx={{ fontSize: 9, color: C.muted }}>
+                  {label}
+                </Typography>
+                <Box
+                  sx={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: "2px",
+                    background: color,
+                    border: `1px solid ${C.border}`,
+                    flexShrink: 0,
+                  }}
+                />
+              </Box>
+            ))}
+          </Box>
+
+        {/* Tooltip — fixed positioning, unaffected by overflow */}
         {tooltip && (
           <Box
             sx={{
@@ -1537,50 +2286,12 @@ const CountyMap = React.memo(
             </Typography>
           </Box>
         )}
-
-        {/* Legend */}
-        <Box
-          sx={{
-            position: "absolute",
-            bottom: 8,
-            right: 10,
-            display: "flex",
-            flexDirection: "column",
-            gap: 0.4,
-            alignItems: "flex-end",
-          }}
-        >
-          {[
-            ["Lead Market", TIER_FILL.lead_market],
-            ["Priority", TIER_FILL.priority_market],
-            ["Watchlist", TIER_FILL.watchlist],
-            ["Deprioritized", TIER_FILL.deprioritized],
-          ].map(([label, color]) => (
-            <Box
-              key={label}
-              sx={{ display: "flex", alignItems: "center", gap: 0.5 }}
-            >
-              <Typography sx={{ fontSize: 9, color: C.muted }}>
-                {label}
-              </Typography>
-              <Box
-                sx={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: "2px",
-                  background: color,
-                  border: `1px solid ${C.border}`,
-                }}
-              />
-            </Box>
-          ))}
-        </Box>
       </Box>
     );
   },
 );
 
-// ─── Ground Score Search Box ─────────────────────────────────────────────────
+// ─── Market Score Search Box ─────────────────────────────────────────────────
 // ─── City dimension configs (mirrors pipeline ACTIVATION/EXPANSION_CITY_DIMS) ──
 const NEOPOLI_DIMS_CONFIG = {
   entry_cost: { weight: 25, metrics: [["zhvi_latest", "lower_better"]] },
@@ -1781,7 +2492,7 @@ async function scoreCityBrowserSide(place, metricBounds, dimConfig) {
   }
 }
 
-// ─── Ground Score Search Box ──────────────────────────────────────────────────
+// ─── Market Score Search Box ──────────────────────────────────────────────────
 const SearchBox = ({
   groundScoreData,
   onSelectCounty,
@@ -2125,10 +2836,10 @@ const CITY_SCORE_COLOR = (composite) => {
 };
 
 const CityMap = React.memo(
-  ({ cities, countyFips, countyName, selectedCityFips, onCitySelect, showOZ, onToggleOZ, ozGeoData, ozLoading }) => {
+  ({ cities, countyFips, countyName, selectedCityFips, onCitySelect, showOZ, onToggleOZ, ozGeoData, ozLoading, defaultZoom = 1 }) => {
     const [topoData, setTopoData] = React.useState(null);
     const [hoveredCity, setHoveredCity] = React.useState(null);
-    const [userZoom, setUserZoom] = React.useState(1);
+    const [userZoom, setUserZoom] = React.useState(defaultZoom);
 
     React.useEffect(() => {
       fetch(GEO_URL)
@@ -2293,19 +3004,21 @@ const CityMap = React.memo(
                 >
                   {isSel ? (
                     <>
+                      {/* Outer orange halo ring — selection indicator */}
                       <circle
-                        r={9 / effectiveZoom}
+                        r={(r + 5) / effectiveZoom}
                         fill="none"
                         stroke="#f97316"
-                        strokeWidth={1 / effectiveZoom}
-                        opacity={0.5}
+                        strokeWidth={3 / effectiveZoom}
+                        opacity={0.9}
                         style={{ pointerEvents: "none" }}
                       />
+                      {/* Inner dot — same score color as unselected */}
                       <circle
-                        r={5 / effectiveZoom}
-                        fill="#f97316"
-                        stroke="#fff"
-                        strokeWidth={1.5 / effectiveZoom}
+                        r={r}
+                        fill={CITY_SCORE_COLOR(city.composite)}
+                        stroke="#f97316"
+                        strokeWidth={2.5 / effectiveZoom}
                         style={{ cursor: "pointer" }}
                         onClick={() =>
                           onCitySelect && onCitySelect(city.place_fips)
@@ -2386,7 +3099,7 @@ const CityMap = React.memo(
               Pop. {(hoveredCity.city.population || 0).toLocaleString()}
             </Typography>
             {[
-              ["Ground Score", hoveredCity.city.composite?.toFixed(1)],
+              ["Market Score", hoveredCity.city.composite?.toFixed(1)],
               ["Entry Cost", hoveredCity.city.dims?.entry_cost?.toFixed(0)],
               ["Metro Access", hoveredCity.city.dims?.metro_access?.toFixed(0)],
             ].map(
@@ -2525,7 +3238,9 @@ const Dashboard = () => {
   const [selectedCityFips, setSelectedCityFips] = useState(null);
   const [onDemandCities, setOnDemandCities] = useState({}); // {place_fips → scored city object}
   const [placesIndex, setPlacesIndex] = useState(null); // national places index, loaded on first search
-  const [deepDives, setDeepDives] = useState({}); // { "thesis:fips" → markdown text }
+  const [deepDives, setDeepDives] = useState(() => { // { "thesis:fips" → markdown text }
+    try { return JSON.parse(localStorage.getItem("ampledge_dd_cache") || "{}"); } catch { return {}; }
+  });
   const [deepDiveLoading, setDeepDiveLoading] = useState(null); // "thesis:fips" key being fetched
   const [coordSelectedFips, setCoordSelectedFips] = useState(null);
   const [coordSelectedExpFips, setCoordSelectedExpFips] = useState(null); // expansion county of the pair
@@ -2536,6 +3251,7 @@ const Dashboard = () => {
   const [showTabOverview, setShowTabOverview] = useState(false);
   const [showAPCard, setShowAPCard] = useState(false);
   const [mapZoom, setMapZoom] = useState(1);
+  const [activeMetricKey, setActiveMetricKey] = useState(null);
   const [showOZ, setShowOZ] = useState(false);
   const [ozGeoData, setOzGeoData] = useState(null);
   const [ozLoading, setOzLoading] = useState(false);
@@ -2550,15 +3266,17 @@ const Dashboard = () => {
 
   // Property Analysis
   const [propAddress, setPropAddress]         = useState("");
-  const [propPrice, setPropPrice]             = useState("");
+  const [propPrice, setPropPrice]             = useState(""); // committed price (drives calculations)
   const [propResult, setPropResult]           = useState(null);
   const [propLoading, setPropLoading]         = useState(false);
   const [propError, setPropError]             = useState(null);
   const [propApShare, setPropApShare]         = useState(0.25);
-  const [propBuyerDown, setPropBuyerDown]     = useState(0.05);
+  const [propBuyerDown, setPropBuyerDown]     = useState(0.03);
   const [propSuggestions, setPropSuggestions] = useState([]);
   const [propSugOpen, setPropSugOpen]         = useState(false);
+  const [reportGenerating, setReportGenerating] = useState(false);
   const propSugSelectedRef = React.useRef(false);
+  const propToggleOZ = React.useCallback(() => setShowOZ(v => !v), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Formation Markets
   const [formationSelectedFips, setFormationSelectedFips] = useState(null);
@@ -2584,6 +3302,51 @@ const Dashboard = () => {
   }, []);
 
   // Render deep dive markdown (bold headers, bullets, inline bold)
+  // Standalone affordability lift banner — rendered before market summary text
+  // (works for both deep dive and m.summary paths)
+  const renderAffordabilityBanner = React.useCallback((met, population) => {
+    if (!met?.zhvi_latest || !met?.median_hhi) return null;
+    const stdPool = _buyerPoolPct(met.zhvi_latest, met.median_hhi, 0.03);
+    const apPool  = _buyerPoolPct(met.zhvi_latest, met.median_hhi, 0.20);
+    if (stdPool == null || apPool == null) return null;
+    const liftPts = Math.round(apPool - stdPool);
+    const estHH   = Math.round((population || 0) / 2.53);
+    const addlHH  = estHH > 0 ? Math.round((Math.abs(apPool - stdPool) / 100) * estHH) : null;
+    return (
+      <Box sx={{ display: "flex", alignItems: "flex-end", gap: 2.5, mb: 1.5, p: 1.5, pr: 2, borderRadius: 1, background: C.navy, border: `1px solid #27ae60`, position: "relative", overflow: "hidden" }}>
+        <Box sx={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: "#27ae60" }} />
+        <Box sx={{ position: "absolute", top: 10, left: 16 }}>
+          <Typography sx={{ fontSize: 8, fontWeight: 700, color: "rgba(255,255,255,0.55)", textTransform: "uppercase", letterSpacing: "0.1em" }}>American Pledge Affordability Lift</Typography>
+        </Box>
+        <Box sx={{ pl: 0.5, mt: 2 }}>
+          <Typography sx={{ fontSize: 26, fontWeight: 800, color: C.white, lineHeight: 1 }}>{liftPts >= 0 ? "+" : ""}{liftPts}</Typography>
+          <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.55)", mt: 0.15 }}>pts buyer pool</Typography>
+        </Box>
+        {addlHH != null && addlHH > 0 && (
+          <Box sx={{ borderLeft: `1px solid rgba(255,255,255,0.15)`, pl: 2 }}>
+            <Typography sx={{ fontSize: 20, fontWeight: 800, color: C.white, lineHeight: 1 }}>~{addlHH.toLocaleString()}</Typography>
+            <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.55)", mt: 0.15 }}>additional qualifying HH</Typography>
+          </Box>
+        )}
+        <Box sx={{ borderLeft: `1px solid rgba(255,255,255,0.15)`, pl: 2 }}>
+          <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.55)" }}>Conv. 3% down</Typography>
+          <Typography sx={{ fontSize: 13, fontWeight: 700, color: stdPool > 50 ? "#4ade80" : stdPool > 40 ? "#86efac" : stdPool > 30 ? "#fbbf24" : stdPool > 20 ? "#f97316" : "#f87171" }}>
+            {stdPool != null ? `~${Math.round(stdPool)}%` : "—"}
+          </Typography>
+        </Box>
+        <Box>
+          <Typography sx={{ fontSize: 9, color: "rgba(255,255,255,0.55)" }}>AP 20% down</Typography>
+          <Typography sx={{ fontSize: 13, fontWeight: 700, color: apPool > 50 ? "#4ade80" : apPool > 40 ? "#86efac" : apPool > 30 ? "#fbbf24" : apPool > 20 ? "#f97316" : "#f87171" }}>
+            {apPool != null ? `~${Math.round(apPool)}%` : "—"}
+          </Typography>
+        </Box>
+        <Box sx={{ position: "absolute", bottom: 8, right: 10 }}>
+          <img src="/ampledge_white.svg" alt="" style={{ height: 18 }} />
+        </Box>
+      </Box>
+    );
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const renderDeepDive = React.useCallback((text) => {
     if (!text) return null;
     const inlineBold = (str, baseKey) =>
@@ -2591,7 +3354,8 @@ const Dashboard = () => {
         const m = p.match(/^\*\*(.+)\*\*$/);
         return m ? <strong key={`${baseKey}-${j}`}>{m[1]}</strong> : p;
       });
-    return text.split("\n").map((line, i) => {
+
+    const lines = text.split("\n").map((line, i) => {
       // Skip h1/h2/h3 headings and horizontal rules
       if (/^#{1,3}\s/.test(line)) return null;
       if (/^---+$/.test(line.trim())) return null;
@@ -2652,7 +3416,17 @@ const Dashboard = () => {
         </div>
       );
     });
+    return <>{lines}</>;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist a deep dive to localStorage so it survives page refreshes
+  const persistDeepDive = React.useCallback((key, text) => {
+    setDeepDives((prev) => {
+      const next = { ...prev, [key]: text };
+      try { localStorage.setItem("ampledge_dd_cache", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
 
   // On-demand deep dive request (async pattern: POST → 202 → poll GET until ready)
   const requestDeepDive = React.useCallback(
@@ -2668,7 +3442,7 @@ const Dashboard = () => {
             .then((r) => r.json())
             .then((data) => {
               if (data.status === "ready" && data.deep_dive) {
-                setDeepDives((prev) => ({ ...prev, [key]: data.deep_dive }));
+                persistDeepDive(key, data.deep_dive);
                 setDeepDiveLoading(null);
               } else {
                 poll(retries - 1);
@@ -2698,7 +3472,7 @@ const Dashboard = () => {
         .then((data) => {
           if (data.deep_dive) {
             // Cache hit — immediate response
-            setDeepDives((prev) => ({ ...prev, [key]: data.deep_dive }));
+            persistDeepDive(key, data.deep_dive);
             setDeepDiveLoading(null);
           } else if (data.status === "generating") {
             // Async — start polling
@@ -2709,7 +3483,7 @@ const Dashboard = () => {
         })
         .catch(() => setDeepDiveLoading(null));
     },
-    [deepDives, deepDiveLoading],
+    [deepDives, deepDiveLoading, persistDeepDive],
   ); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sync URL to active tab
@@ -2731,10 +3505,10 @@ const Dashboard = () => {
     if (curUrl !== newUrl) window.history.replaceState(null, "", newUrl);
   }, [neopoliMarket, selectedCityFips]);
 
-  // Fetch Kalshi prediction market data once when Housing Market tab is first visited
+  // Fetch Kalshi prediction market data once when Housing Market or Property Analysis tab is first visited
   const kalshiFetchedRef = React.useRef(false);
   React.useEffect(() => {
-    if (chartPane !== "housing") return;
+    if (chartPane !== "housing" && chartPane !== "property") return;
     if (kalshiFetchedRef.current) return;
     kalshiFetchedRef.current = true;
     setKalshiLoading(true);
@@ -2756,7 +3530,7 @@ const Dashboard = () => {
       });
   }, [chartPane, kalshiRefreshKey]);
 
-  // Fetch Ground Score county data + places index from S3 when any market tab first opens
+  // Fetch Market Score county data + places index from S3 when any market tab first opens
   const gsFetchedRef = React.useRef(false);
   React.useEffect(() => {
     if (chartPane !== "neopoli" && chartPane !== "opportunity" && chartPane !== "coordinated" && chartPane !== "formation" && chartPane !== "engineered" && chartPane !== "property") return;
@@ -2778,7 +3552,8 @@ const Dashboard = () => {
       .then(([data, places, dives]) => {
         setGroundScoreData(data);
         if (places) setPlacesIndex(places);
-        if (dives?.deep_dives) setDeepDives(dives.deep_dives);
+        // Merge: S3 is authoritative; localStorage fills any gaps not yet in S3
+        if (dives?.deep_dives) setDeepDives((prev) => ({ ...prev, ...dives.deep_dives }));
         setGroundScoreLoading(false);
         setNeopoliMarket(
           (cur) =>
@@ -2802,12 +3577,111 @@ const Dashboard = () => {
       });
   }, [chartPane]);
 
+  // Fallback: if a Property analysis result arrives but ground score data still isn't loaded
+  // (e.g. user analyzed before the tab-open fetch completed), trigger the fetch now.
+  const gsFallbackFiredRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!propResult) return;
+    if (groundScoreData || gsFetchedRef.current || gsFallbackFiredRef.current) return;
+    gsFallbackFiredRef.current = true;
+    gsFetchedRef.current = true;
+    setGroundScoreLoading(true);
+    Promise.all([
+      fetch("https://ampledge-fund.s3.us-east-1.amazonaws.com/ground-score/counties.json", { cache: "reload" }).then((r) => r.json()),
+      fetch(PLACES_INDEX_URL).then((r) => r.json()).catch(() => null),
+      fetch(DEEP_DIVES_URL, { cache: "reload" }).then((r) => r.json()).catch(() => null),
+    ])
+      .then(([data, places, dives]) => {
+        setGroundScoreData(data);
+        if (places) setPlacesIndex(places);
+        if (dives?.deep_dives) setDeepDives((prev) => ({ ...dives.deep_dives, ...prev }));
+        setGroundScoreLoading(false);
+      })
+      .catch(() => {
+        setGroundScoreLoading(false);
+        // don't reset refs — let main effect handle retry on tab switch
+      });
+  }, [propResult]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Defer map pin update by one frame so bar/chart animations start before
   // the expensive CountyMap re-render (3,144 Geography elements) begins
   React.useEffect(() => {
     const id = requestAnimationFrame(() => setMapFips(neopoliMarket));
     return () => cancelAnimationFrame(id);
   }, [neopoliMarket]);
+
+  // Memoized property map data — keyed on data sources only, NOT on propPrice.
+  // This prevents CountyMap/CityMap from re-rendering when only the price changes.
+  const propMapCounties = React.useMemo(
+    () => groundScoreData?.activation || [],
+    [groundScoreData]
+  );
+  const propCitiesInCounty = React.useMemo(() => {
+    if (!propResult) return [];
+    const county = (groundScoreData?.activation || []).find(c => c.fips === propResult.fips)
+      || (groundScoreData?.expansion || []).find(c => c.fips === propResult.fips);
+    const scoredCities = [
+      ...(county?.cities || []),
+      ...Object.values(onDemandCities).filter(c => c.county_fips === propResult.fips),
+    ];
+    if (scoredCities.length > 0) return scoredCities;
+    // Fallback: placesIndex cities have no composite — derive one from population percentile
+    // so the map shows meaningful color variation instead of all-gray.
+    const fallback = placesIndex ? placesIndex.filter(p => p.county_fips === propResult.fips) : [];
+    if (!fallback.length) return [];
+    const maxPop = Math.max(...fallback.map(c => c.population || 0), 1);
+    return fallback.map(c => ({
+      ...c,
+      composite: Math.round(((c.population || 0) / maxPop) * 100),
+    }));
+  }, [groundScoreData, propResult, onDemandCities, placesIndex]);
+
+  // Find the city in the county closest to the property coordinates for highlighting.
+  const propSelectedCityFips = React.useMemo(() => {
+    if (!propResult || !propCitiesInCounty.length) return null;
+    let closest = null;
+    let minDist = Infinity;
+    for (const city of propCitiesInCounty) {
+      if (city.lat == null || city.lon == null) continue;
+      const d = Math.hypot(city.lat - propResult.lat, city.lon - propResult.lon);
+      if (d < minDist) { minDist = d; closest = city.place_fips; }
+    }
+    return closest;
+  }, [propResult, propCitiesInCounty]);
+
+  // Pre-score all counties under Formation and Engineered theses using their
+  // respective scoring functions, then assign percentile-based tiers for the map.
+  const _assignTiers = (scored) => {
+    if (!scored.length) return scored;
+    const vals = scored.map(c => c._composite).sort((a, b) => a - b);
+    const n = vals.length;
+    return scored.map(c => {
+      const rank = vals.filter(v => v <= c._composite).length;
+      const pct = rank / n * 100;
+      const tier = pct >= 95 ? "lead_market" : pct >= 80 ? "priority_market" : pct >= 50 ? "watchlist" : "deprioritized";
+      return { ...c, tier };
+    });
+  };
+
+  const formationCounties = React.useMemo(() => {
+    if (!groundScoreData) return [];
+    const scored = groundScoreData.activation.map(c => {
+      const fs = _formationScore(c.metrics);
+      if (!fs) return null;
+      return { ...c, _composite: fs.composite };
+    }).filter(Boolean);
+    return _assignTiers(scored);
+  }, [groundScoreData]);
+
+  const engineeredCounties = React.useMemo(() => {
+    if (!groundScoreData) return [];
+    const scored = groundScoreData.activation.map(c => {
+      const es = _engineeredScore(c.metrics, engineeredProfile);
+      if (!es) return null;
+      return { ...c, _composite: es.composite };
+    }).filter(Boolean);
+    return _assignTiers(scored);
+  }, [groundScoreData, engineeredProfile]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reset pages + city selection when selected county changes
   React.useEffect(() => {
@@ -2894,6 +3768,28 @@ const Dashboard = () => {
     );
     if (first) setSelectedCityFips(first.place_fips);
   }, [onDemandCities]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-jump formation rankings page when formationSelectedFips changes (search or map click)
+  React.useEffect(() => {
+    if (!groundScoreData || !formationSelectedFips) return;
+    const sorted = [...groundScoreData.activation]
+      .map(c => { const fs = _formationScore(c.metrics); return fs ? { fips: c.fips, composite: fs.composite } : null; })
+      .filter(Boolean)
+      .sort((a, b) => b.composite - a.composite);
+    const idx = sorted.findIndex(c => c.fips === formationSelectedFips);
+    if (idx >= 0) setFormationPage(Math.floor(idx / GS_PAGE_SIZE));
+  }, [formationSelectedFips]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-jump engineered rankings page when engineeredSelectedFips changes (search or map click)
+  React.useEffect(() => {
+    if (!groundScoreData || !engineeredSelectedFips) return;
+    const sorted = [...groundScoreData.activation]
+      .map(c => { const es = _engineeredScore(c.metrics, engineeredProfile); return es ? { fips: c.fips, composite: es.composite } : null; })
+      .filter(Boolean)
+      .sort((a, b) => b.composite - a.composite);
+    const idx = sorted.findIndex(c => c.fips === engineeredSelectedFips);
+    if (idx >= 0) setEngineeredPage(Math.floor(idx / GS_PAGE_SIZE));
+  }, [engineeredSelectedFips]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reset coordinated sim deltas + brief expansion when selected county changes
   React.useEffect(() => {
@@ -4060,11 +4956,36 @@ const Dashboard = () => {
     );
   }, [propAddress]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Auto-populate listing price: AVM with CS cross-check ─────────────────
+  // When Rentcast AVM has low confidence (range spread > 20%), its midpoint
+  // tends to anchor near the last sale and undercount appreciation in
+  // high-velocity markets (e.g. post-COVID Mt. Pleasant spike). In that case
+  // we compute the CS-adjusted last sale and take the higher of the two.
+  React.useEffect(() => {
+    if (!propResult) return;
+    let value = null;
+    if (propResult.avmValue) {
+      value = propResult.avmValue;
+      // Cross-check with CS appreciation when AVM confidence is low
+      const rangeSpread = (propResult.avmLow && propResult.avmHigh)
+        ? (propResult.avmHigh - propResult.avmLow) / propResult.avmValue
+        : 0;
+      if (rangeSpread > 0.20 && propResult.lastSalePrice && propResult.lastSaleDate) {
+        const cs = _csAppraisedValue(propResult.lastSalePrice, propResult.lastSaleDate);
+        if (cs && cs.appreciatedPrice > value) value = cs.appreciatedPrice;
+      }
+    } else if (propResult.lastSalePrice && propResult.lastSaleDate) {
+      const appraisal = _csAppraisedValue(propResult.lastSalePrice, propResult.lastSaleDate);
+      if (appraisal) value = appraisal.appreciatedPrice;
+    }
+    if (!value) return;
+    setPropPrice("$" + Math.round(value).toLocaleString());
+  }, [propResult]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Property Analysis: geocode + enrich ──────────────────────────────────
   const analyzeProperty = React.useCallback(async (overrideAddr) => {
     const addr = (overrideAddr || propAddress).trim();
-    const price = parseFloat(propPrice.replace(/[^0-9.]/g, ""));
-    if (!addr || !price) { setPropError("Enter a full address and listing price."); return; }
+    if (!addr) { setPropError("Enter a property address."); return; }
     setPropLoading(true);
     setPropSugOpen(false);
     setPropSuggestions([]);
@@ -4096,20 +5017,62 @@ const Dashboard = () => {
       const countyName = fccData?.County?.name || null;
       const stateAbbr  = fccData?.State?.code  || null;
 
-      // 3. Look up county in Ground Score data (if loaded)
+      // 3. Look up county in Market Score data (if loaded)
       const gsd = groundScoreData;
       const gsCounty = fips && gsd
         ? (gsd.activation.find(c => c.fips === fips) || gsd.expansion?.find(c => c.fips === fips))
         : null;
 
+      // 4. Rentcast — property details + AVM valuation (parallel, best-effort)
+      let lastSalePrice = null, lastSaleDate = null;
+      let avmValue = null, avmLow = null, avmHigh = null, avmComps = null;
+      try {
+        const rcKey = process.env.REACT_APP_RENTCAST_KEY;
+        if (rcKey) {
+          const [propsRes, avmRes] = await Promise.allSettled([
+            fetch(
+              `https://api.rentcast.io/v1/properties?address=${encodeURIComponent(displayAddr)}&limit=1`,
+              { headers: { "X-Api-Key": rcKey, accept: "application/json" } }
+            ),
+            fetch(
+              `https://api.rentcast.io/v1/avm/value?address=${encodeURIComponent(displayAddr)}`,
+              { headers: { "X-Api-Key": rcKey, accept: "application/json" } }
+            ),
+          ]);
+          if (propsRes.status === "fulfilled" && propsRes.value.ok) {
+            const rcData = await propsRes.value.json();
+            const prop = Array.isArray(rcData) ? rcData[0] : rcData;
+            lastSalePrice = prop?.lastSalePrice ?? null;
+            lastSaleDate  = prop?.lastSaleDate  ?? null;
+          }
+          if (avmRes.status === "fulfilled" && avmRes.value.ok) {
+            const avmData = await avmRes.value.json();
+            avmValue = avmData?.price          ?? null;
+            avmLow   = avmData?.priceRangeLow  ?? null;
+            avmHigh  = avmData?.priceRangeHigh ?? null;
+            avmComps = avmData?.comparables?.length ?? null;
+            // AVM subjectProperty is a richer source of last-sale data — use it
+            // as a fallback when the /v1/properties call didn't return sale history.
+            const subj = avmData?.subjectProperty;
+            if (!lastSalePrice && subj?.lastSalePrice) lastSalePrice = subj.lastSalePrice;
+            if (!lastSaleDate  && subj?.lastSaleDate)  lastSaleDate  = subj.lastSaleDate;
+          }
+        }
+      } catch {}
+
       setPropResult({
         address: displayAddr,
-        price,
         lat, lon,
         fips,
         countyName: gsCounty?.name || countyName,
         state: gsCounty?.state || stateAbbr,
         gsCounty,
+        lastSalePrice,
+        lastSaleDate,
+        avmValue,
+        avmLow,
+        avmHigh,
+        avmComps,
       });
     } catch (e) {
       setPropError(e?.message || "Geocoding failed — check your connection and try again.");
@@ -4172,7 +5135,7 @@ const Dashboard = () => {
             <Typography
               sx={{ color: "#a0b4c8", fontWeight: 400, fontSize: 14 }}
             >
-              Investment Performance Report
+              Housing Market Intelligence
             </Typography>
           </Box>
           <Typography sx={{ color: "#5a7898", fontSize: 11, mt: 0.5 }}>
@@ -4382,8 +5345,9 @@ const Dashboard = () => {
 
           const price    = parseFloat(propPrice.replace(/[^0-9.]/g, "")) || 0;
           const result   = propResult;
-          const stdDP    = propBuyerDown;
-          const apContrib = price > 0 ? Math.max(0, 0.20 - stdDP) * price : 0;
+          const stdDP    = propBuyerDown;          // slider — standard loan only
+          const AP_BUYER_DOWN = 0.01;              // AP always requires 1% buyer down
+          const apContrib = price > 0 ? (0.20 - AP_BUYER_DOWN) * price : 0;  // AP always covers 19%
 
           // Standard card payment
           const stdPI    = price > 0 ? _monthlyMortgage(price, stdDP, kalshiMtg) : null;
@@ -4402,27 +5366,28 @@ const Dashboard = () => {
           const lift     = (stdPool != null && apPool != null) ? apPool - stdPool : null;
 
           return (
+            <Box sx={{ overflow: "hidden", width: "100%" }}>
             <Grid container spacing={2.5}>
 
               {/* ── LEFT: Form ──────────────────────────────────────────── */}
               <Grid item xs={12} md={4}>
                 <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1, overflow: "visible", height: "100%" }}>
                   <CardContent sx={{ pb: "12px !important", overflow: "visible" }}>
-                    <SectionHeader title="Property Analysis" sub="Enter an address and listing price to generate a full mortgage &amp; market overview" />
+                    <SectionHeader title="Property Analysis" sub="Enter an address to generate a full mortgage &amp; market overview" />
 
                     {/* Address */}
                     <Box sx={{ mb: 2, position: "relative" }}>
                       <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.5 }}>Property Address</Typography>
                       <input
                         value={propAddress}
-                        onChange={e => { setPropAddress(e.target.value); }}
+                        onChange={e => { setPropAddress(e.target.value); setPropResult(null); setPropPrice(""); }}
                         onKeyDown={e => {
                           if (e.key === "Enter") { setPropSugOpen(false); analyzeProperty(); }
                           if (e.key === "Escape") setPropSugOpen(false);
                         }}
                         onFocus={() => propSuggestions.length > 0 && setPropSugOpen(true)}
                         onBlur={() => setTimeout(() => setPropSugOpen(false), 150)}
-                        placeholder="344 Coinbow Drive, Richmond VA 23223"
+                        placeholder="Enter an address..."
                         style={{ width: "100%", fontSize: 13, padding: "8px 12px", border: `1px solid ${C.border}`, borderRadius: 4, fontFamily: "'Inter',sans-serif", outline: "none", boxSizing: "border-box" }}
                       />
                       {propSugOpen && propSuggestions.length > 0 && (
@@ -4439,6 +5404,7 @@ const Dashboard = () => {
                                   setPropAddress(s.description);
                                   setPropSugOpen(false);
                                   setPropSuggestions([]);
+                                  analyzeProperty(s.description);
                                 }}
                                 sx={{ px: 1.5, py: 1, cursor: "pointer", borderBottom: i < propSuggestions.length - 1 ? `1px solid ${C.border}` : "none", "&:hover": { bgcolor: C.bg } }}
                               >
@@ -4451,49 +5417,78 @@ const Dashboard = () => {
                       )}
                     </Box>
 
-                    {/* Listing Price */}
+                    {/* Estimated Value — computed from AVM or CS appreciation, read-only */}
                     <Box sx={{ mb: 2 }}>
-                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.5 }}>Listing Price</Typography>
+                      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.5 }}>
+                        <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Estimated Value</Typography>
+                        {!propLoading && propResult?.avmValue ? (
+                          <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+                            <Box sx={{ width: 5, height: 5, borderRadius: "50%", background: "#4ade80" }} />
+                            <Typography sx={{ fontSize: 7, fontWeight: 700, color: "#4ade80", letterSpacing: "0.06em" }}>AVM</Typography>
+                          </Box>
+                        ) : !propLoading && propResult?.lastSalePrice ? (
+                          <Typography sx={{ fontSize: 7, color: C.muted, letterSpacing: "0.04em" }}>CS APPRECIATION</Typography>
+                        ) : null}
+                      </Box>
+                      <Box sx={{ px: 1.5, py: 1, border: `1px solid ${C.border}`, borderRadius: 1, background: C.navy }}>
+                        {propLoading
+                          ? <Box sx={{ display: "flex", alignItems: "center", height: 22 }}>
+                              <Box sx={{ width: 20, height: 20, border: "2.5px solid rgba(255,255,255,0.18)", borderTopColor: "#4ade80", borderRadius: "50%", animation: "spin 0.7s linear infinite", "@keyframes spin": { to: { transform: "rotate(360deg)" } } }} />
+                            </Box>
+                          : <Typography sx={{ fontSize: 15, fontWeight: 800, color: C.white, lineHeight: 1 }}>
+                              {propPrice || "—"}
+                            </Typography>
+                        }
+                        {!propLoading && propResult?.avmValue && propResult?.avmLow && propResult?.avmHigh && (
+                          <Typography sx={{ fontSize: 8, color: "rgba(255,255,255,0.5)", mt: 0.5 }}>
+                            Range: ${(propResult.avmLow / 1e6).toFixed(2)}M – ${(propResult.avmHigh / 1e6).toFixed(2)}M
+                            {propResult.avmComps ? ` · ${propResult.avmComps} comps` : ""}
+                          </Typography>
+                        )}
+                        {!propLoading && !propResult?.avmValue && propResult?.lastSalePrice && propResult?.lastSaleDate && (() => {
+                          const a = _csAppraisedValue(propResult.lastSalePrice, propResult.lastSaleDate);
+                          if (!a) return null;
+                          const saleMonth = new Date(propResult.lastSaleDate).toLocaleDateString("en-US", { year: "numeric", month: "short" });
+                          return (
+                            <Typography sx={{ fontSize: 8, color: "rgba(255,255,255,0.5)", mt: 0.5 }}>
+                              Last sold ${propResult.lastSalePrice.toLocaleString()} ({saleMonth}) · {a.pctGain >= 0 ? "+" : ""}{a.pctGain}% over {a.yearsHeld}yr
+                            </Typography>
+                          );
+                        })()}
+                      </Box>
+                    </Box>
+
+                    {/* Down Payment slider — standard loan comparison only */}
+                    <Box sx={{ mb: 2 }}>
+                      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", mb: 0.5 }}>
+                        <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Standard Loan Down Payment</Typography>
+                        <Typography sx={{ fontSize: 13, fontWeight: 700, color: C.navy }}>{Math.round(propBuyerDown * 100)}%</Typography>
+                      </Box>
+                      <Typography sx={{ fontSize: 8, color: C.muted, mb: 0.5 }}>AP loan always uses 1% buyer down · slider for comparison only</Typography>
                       <input
-                        value={propPrice}
-                        onChange={e => setPropPrice(e.target.value.replace(/[^0-9]/g, ""))}
-                        onBlur={e => {
-                          const raw = e.target.value.replace(/[^0-9]/g, "");
-                          setPropPrice(raw ? "$" + parseInt(raw, 10).toLocaleString() : "");
-                        }}
-                        onFocus={e => {
-                          const raw = e.target.value.replace(/[^0-9]/g, "");
-                          setPropPrice(raw || "");
-                        }}
-                        onKeyDown={e => e.key === "Enter" && analyzeProperty()}
-                        placeholder="$425,000"
-                        style={{ width: "100%", fontSize: 13, padding: "8px 12px", border: `1px solid ${C.border}`, borderRadius: 4, fontFamily: "'Inter',sans-serif", outline: "none", boxSizing: "border-box" }}
+                        type="range"
+                        min={0}
+                        max={19}
+                        step={1}
+                        value={Math.round(propBuyerDown * 100)}
+                        onChange={e => setPropBuyerDown(parseInt(e.target.value, 10) / 100)}
+                        style={{ width: "100%", accentColor: C.navy, cursor: "pointer" }}
                       />
+                      <Box sx={{ display: "flex", justifyContent: "space-between", mt: 0.25 }}>
+                        <Typography sx={{ fontSize: 8, color: C.muted }}>0%</Typography>
+                        <Typography sx={{ fontSize: 8, color: C.muted }}>19%</Typography>
+                      </Box>
                     </Box>
 
-                    {/* Down Payment */}
-                    <Box sx={{ mb: 2 }}>
-                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.5 }}>Buyer Down Payment</Typography>
-                      <select
-                        value={propBuyerDown}
-                        onChange={e => setPropBuyerDown(parseFloat(e.target.value))}
-                        style={{ width: "100%", fontSize: 12, padding: "8px 10px", border: `1px solid ${C.border}`, borderRadius: 4, fontFamily: "'Inter',sans-serif", background: C.white, cursor: "pointer" }}
+                    {/* Re-analyze (manual fallback) */}
+                    {propResult && !propLoading && (
+                      <button
+                        onClick={() => analyzeProperty()}
+                        style={{ width: "100%", padding: "8px 0", fontSize: 11, fontWeight: 600, color: C.muted, background: "transparent", border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}
                       >
-                        <option value={0}>0%</option>
-                        <option value={0.035}>3.5%</option>
-                        <option value={0.05}>5%</option>
-                        <option value={0.10}>10%</option>
-                      </select>
-                    </Box>
-
-                    {/* Analyze */}
-                    <button
-                      onClick={() => analyzeProperty()}
-                      disabled={propLoading}
-                      style={{ width: "100%", padding: "10px 0", fontSize: 12, fontWeight: 700, color: C.white, background: C.navy, border: "none", borderRadius: 4, cursor: propLoading ? "default" : "pointer", fontFamily: "'Inter',sans-serif", opacity: propLoading ? 0.7 : 1 }}
-                    >
-                      {propLoading ? "Analyzing…" : "Analyze Property"}
-                    </button>
+                        Re-analyze Address
+                      </button>
+                    )}
                     {propError && (
                       <Typography sx={{ fontSize: 11, color: "#e57373", mt: 1 }}>{propError}</Typography>
                     )}
@@ -4502,7 +5497,7 @@ const Dashboard = () => {
               </Grid>
 
               {/* ── RIGHT: Output ───────────────────────────────────────── */}
-              <Grid item xs={12} md={8}>
+              <Grid item xs={12} md={8} sx={{ minWidth: 0, overflow: "hidden", width: "100%", maxWidth: { md: "67%" } }}>
 
                 {propLoading && (
                   <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, py: 8 }}>
@@ -4513,7 +5508,7 @@ const Dashboard = () => {
 
                 {!propLoading && !result && (
                   <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", minHeight: 200 }}>
-                    <Typography sx={{ fontSize: 12, color: C.muted, textAlign: "center" }}>Enter an address and listing price,<br />then click Analyze Property.</Typography>
+                    <Typography sx={{ fontSize: 12, color: C.muted, textAlign: "center" }}>Start typing a property address<br />and select it from the suggestions.</Typography>
                   </Box>
                 )}
 
@@ -4523,22 +5518,114 @@ const Dashboard = () => {
                   const hpa     = met.zhvi_growth_1yr ?? 0.03;
                   const hpaOut  = county ? _hpaOutlook(met, kalshiMtgRaw) : null;
 
+                  const mapCounties = propMapCounties;
+                  const citiesInCounty = propCitiesInCounty;
+
+                  // projHpa for the report — blend model implied midpoint (40%) with trailing
+                  // county ZHVI 1yr (60%), floored at 2% and capped at 8%.
+                  // This prevents the purely signal-based model from producing unrealistically
+                  // low projections in high-appreciation markets (e.g. coastal SC).
+                  const _modelMid = hpaOut ? (hpaOut.hpaLow + hpaOut.hpaHigh) / 2 / 100 : null;
+                  const _localHpa = hpa ?? 0.03;
+                  const projHpaInner = _modelMid != null
+                    ? Math.min(Math.max(_modelMid * 0.4 + _localHpa * 0.6, 0.02), 0.08)
+                    : Math.min(Math.max(_localHpa * 0.7, 0.02), 0.08);
+
                   return (
                     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
 
                       {/* Property header */}
                       <Card elevation={0} sx={{ border: `1px solid ${C.navy}`, borderRadius: 1, overflow: "hidden" }}>
-                        <Box sx={{ background: C.navy, px: 2, py: 1.25 }}>
-                          <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.white, textTransform: "uppercase", letterSpacing: "0.09em" }}>Property Overview</Typography>
-                          <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.65)", mt: 0.25 }}>{result.address}</Typography>
+                        <Box sx={{ background: C.navy, px: 2, py: 1.25, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <Box>
+                            <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.white, textTransform: "uppercase", letterSpacing: "0.09em" }}>Property Overview</Typography>
+                            <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.65)", mt: 0.25 }}>{result.address}</Typography>
+                          </Box>
+                          {price > 0 && (
+                            <button
+                              disabled={reportGenerating}
+                              onClick={async () => {
+                                setReportGenerating(true);
+                                try {
+                                  await generateAndOpenReport({
+                                    address:      result.address,
+                                    price,
+                                    countyName:   result.countyName,
+                                    state:        result.state,
+                                    stdDP,
+                                    kalshiMtgPct,
+                                    kalshiMtg,
+                                    stdPI,
+                                    stdPMI,
+                                    stdTotal,
+                                    apPI,
+                                    apContrib,
+                                    savings,
+                                    apDTI,
+                                    stdDTI,
+                                    apPool,
+                                    stdPool,
+                                    lift,
+                                    hhi,
+                                    county,
+                                    met,
+                                    hpaOut,
+                                    projHpa: projHpaInner,
+                                    lat: result.lat,
+                                    lon: result.lon,
+                                    deepDive: (() => {
+                                      const f = county?.fips ?? result.fips;
+                                      if (!f) return null;
+                                      return (
+                                        deepDives[`activation:${f}`] ||
+                                        deepDives[`expansion:${f}`] ||
+                                        deepDives[`formation:${f}`] ||
+                                        deepDives[`engineered:${f}`] ||
+                                        null
+                                      );
+                                    })(),
+                                    avmValue:      result.avmValue      ?? null,
+                                    avmLow:        result.avmLow        ?? null,
+                                    avmHigh:       result.avmHigh       ?? null,
+                                    avmComps:      result.avmComps      ?? null,
+                                    lastSalePrice: result.lastSalePrice ?? null,
+                                    lastSaleDate:  result.lastSaleDate  ?? null,
+                                    generated: new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
+                                  });
+                                } finally {
+                                  setReportGenerating(false);
+                                }
+                              }}
+                              style={{
+                                display: "flex", alignItems: "center", gap: 6,
+                                background: reportGenerating ? C.muted : C.orange, color: "#fff",
+                                border: "none", borderRadius: 4,
+                                cursor: reportGenerating ? "not-allowed" : "pointer",
+                                fontSize: 10, fontWeight: 700, fontFamily: "'Inter',sans-serif",
+                                padding: "6px 12px", whiteSpace: "nowrap", flexShrink: 0,
+                                opacity: reportGenerating ? 0.7 : 1,
+                              }}
+                            >
+                              {reportGenerating ? (
+                                <>
+                                  <span style={{
+                                    width: 10, height: 10, border: "2px solid rgba(255,255,255,0.4)",
+                                    borderTopColor: "#fff", borderRadius: "50%",
+                                    display: "inline-block", animation: "spin 0.7s linear infinite",
+                                  }} />
+                                  Building…
+                                </>
+                              ) : "⬇ Borrower Report"}
+                            </button>
+                          )}
                         </Box>
                         <CardContent sx={{ pb: "12px !important" }}>
                           <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
                             {[
                               { label: "Listing Price", value: `$${price.toLocaleString()}`, accent: true },
                               { label: "County", value: `${result.countyName}, ${result.state}` },
-                              { label: "AP Contribution", value: apContrib > 0 ? `$${Math.round(apContrib).toLocaleString()} (${((0.20 - stdDP) * 100 % 1 === 0 ? ((0.20 - stdDP) * 100).toFixed(0) : ((0.20 - stdDP) * 100).toFixed(1))}%)` : "Buyer ≥ 20%" },
-                              { label: "Buyer Down", value: `${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% · $${Math.round(stdDP * price).toLocaleString()}` },
+                              { label: "AP Contribution", value: price > 0 ? `$${Math.round(apContrib).toLocaleString()} (19% of price)` : "19% of price" },
+                              { label: "Std Down (Slider)", value: `${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% · $${Math.round(stdDP * price).toLocaleString()}` },
                               { label: "Mortgage Rate", value: `${kalshiMtgPct.toFixed(2)}% (Kalshi)` },
                             ].map(({ label, value, accent }) => (
                               <Box key={label} sx={{ flex: "1 1 130px", minWidth: 120, border: `1px solid ${accent ? C.navy + "44" : C.border}`, borderRadius: 1, p: 0.75, background: accent ? C.navy + "08" : "transparent" }}>
@@ -4550,13 +5637,85 @@ const Dashboard = () => {
                         </CardContent>
                       </Card>
 
+                      {/* Dual maps — national choropleth + county city view */}
+                      <Box sx={{ display: "flex", gap: 1.5, height: 390 }}>
+
+                        {/* Left: national county choropleth */}
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1, overflow: "hidden", flex: "1 1 0", display: "flex", flexDirection: "column" }}>
+                          <Box sx={{ px: 2, py: 1, borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+                            <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.08em" }}>Market Score Map</Typography>
+                            <Typography sx={{ fontSize: 9, color: C.muted }}>{result.countyName}, {result.state} selected</Typography>
+                          </Box>
+                          <Box id="pdf-gs-county-map" sx={{ flex: 1, overflow: "hidden" }}>
+                            {groundScoreLoading ? (
+                              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}>
+                                <Typography sx={{ fontSize: 10, color: C.muted }}>Loading market data…</Typography>
+                              </Box>
+                            ) : (
+                              <CountyMap
+                                counties={mapCounties}
+                                selectedFips={result.fips}
+                                thesis="activation"
+                                zoom={1}
+                                center={US_MAP_CENTER}
+                                onSelect={NOOP}
+                              />
+                            )}
+                          </Box>
+                        </Card>
+
+                        {/* Right: city dot map for the property's county */}
+                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1, overflow: "hidden", flex: "1 1 0", display: "flex", flexDirection: "column" }}>
+                          <Box sx={{ px: 2, py: 1, borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+                            <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.08em" }}>{result.countyName}</Typography>
+                            <Typography sx={{ fontSize: 9, color: C.muted }}>{citiesInCounty.length} cities · {result.lat?.toFixed(4)}°N {Math.abs(result.lon)?.toFixed(4)}°W</Typography>
+                          </Box>
+                          <Box id="pdf-gs-city-map" sx={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                            {groundScoreLoading ? (
+                              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}>
+                                <Typography sx={{ fontSize: 10, color: C.muted }}>Loading market data…</Typography>
+                              </Box>
+                            ) : citiesInCounty.length > 0 ? (
+                              <CityMap
+                                cities={citiesInCounty}
+                                countyFips={result.fips}
+                                countyName={result.countyName || ""}
+                                selectedCityFips={propSelectedCityFips}
+                                onCitySelect={NOOP}
+                                showOZ={showOZ}
+                                onToggleOZ={propToggleOZ}
+                                ozGeoData={ozGeoData}
+                                ozLoading={ozLoading}
+                                defaultZoom={2.56}
+                              />
+                            ) : (
+                              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", flex: 1, flexDirection: "column", gap: 1 }}>
+                                <Typography sx={{ fontSize: 11, color: C.muted, textAlign: "center" }}>
+                                  {!groundScoreData ? "Load market data to see cities" : "No city data for this county"}
+                                </Typography>
+                              </Box>
+                            )}
+                          </Box>
+                        </Card>
+
+                      </Box>
+
+                      {/* Waiting for listing price */}
+                      {price === 0 && (
+                        <Card elevation={0} sx={{ border: `1px dashed ${C.border}`, borderRadius: 1 }}>
+                          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", py: 4 }}>
+                            <Typography sx={{ fontSize: 12, color: C.muted, textAlign: "center" }}>Enter a listing price to see<br />mortgage comparison &amp; equity projections.</Typography>
+                          </Box>
+                        </Card>
+                      )}
+
                       {/* Standard vs AP mortgage cards */}
                       {stdTotal != null && apPI != null && (
                         <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                           <CardContent sx={{ pb: "12px !important" }}>
                             <SectionHeader
                               title="Mortgage Comparison"
-                              sub={`${kalshiMtgPct.toFixed(2)}% rate (Kalshi) · 30-yr fixed · Standard: ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% down · AP: 20% down (buyer ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% + AP ${((0.20 - stdDP) * 100 % 1 === 0 ? ((0.20 - stdDP) * 100).toFixed(0) : ((0.20 - stdDP) * 100).toFixed(1))}%)`}
+                              sub={`${kalshiMtgPct.toFixed(2)}% rate (Kalshi) · 30-yr fixed · Standard: ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% down · AP: 20% down (buyer 1% + AP 19%)`}
                             />
                             <Box sx={{ display: "flex", gap: 1.5, mb: 1.5, flexWrap: "wrap" }}>
 
@@ -4588,7 +5747,7 @@ const Dashboard = () => {
 
                               {/* AP card */}
                               <Box sx={{ flex: "1 1 140px", border: `2px solid ${C.navy}`, borderRadius: 1, p: 1.5, background: C.navy, position: "relative" }}>
-                                <Typography sx={{ fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,0.6)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>American Pledge · 20% Down</Typography>
+                                <Typography sx={{ fontSize: 9, fontWeight: 800, color: "rgba(255,255,255,0.6)", textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.75 }}>American Pledge · 1% Buyer + 19% AP = 20% Down</Typography>
                                 <Box sx={{ display: "flex", alignItems: "flex-start", gap: "16px", mb: 0 }}>
                                   <Typography sx={{ fontSize: 26, fontWeight: 800, color: C.white, lineHeight: 1 }}>${Math.round(apPI).toLocaleString()}</Typography>
                                   {savings != null && savings > 0 && (
@@ -4635,6 +5794,71 @@ const Dashboard = () => {
                         </Card>
                       )}
 
+                      {/* ── How American Pledge Works For You ─────────────── */}
+                      {stdTotal != null && apPI != null && (
+                      <Card elevation={0} sx={{ border: `1px solid ${C.navy}22`, borderRadius: 1, background: C.navy + "05" }}>
+                        <CardContent sx={{ pb: "12px !important" }}>
+                          <Box sx={{ mb: 1.5 }}>
+                            <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.08em" }}>How American Pledge Works For You</Typography>
+                            <Typography sx={{ fontSize: 9, color: C.muted, mt: 0.25 }}>One simple loan · No PMI · Built-in hardship protection · 1% buyer down</Typography>
+                          </Box>
+
+                          {/* Step-by-step explanation */}
+                          <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
+                            {[
+                              {
+                                step: "1",
+                                title: "You put down just 1%",
+                                body: price > 0
+                                  ? `You bring 1% ($${Math.round(AP_BUYER_DOWN * price).toLocaleString()}). American Pledge contributes the remaining 19% ($${Math.round(apContrib).toLocaleString()}) to complete a full 20% down — so you never pay PMI.`
+                                  : "You bring just 1% down. American Pledge contributes the remaining 19% to complete a full 20% down — so you never pay PMI.",
+                                color: C.navy,
+                              },
+                              {
+                                step: "2",
+                                title: "Your loan is smaller",
+                                body: price > 0
+                                  ? `Your mortgage is on 80% of the home ($${Math.round(price * 0.80).toLocaleString()}) vs ${Math.round((1 - stdDP) * 100)}% on the standard loan. Lower principal, lower payment — no PMI ever.`
+                                  : "Your senior loan covers only 80% of the home value, giving you a lower principal, lower payment, and no PMI.",
+                                color: "#0e7490",
+                              },
+                              {
+                                step: "3",
+                                title: "Hardship protection built in",
+                                body: "If you face job loss, a medical emergency, or a major family disruption, the Hardship Assistance Fund (HAF) covers your mortgage payments temporarily — paid directly to your servicer. Plus free HUD-aligned financial counseling.",
+                                color: C.greenLight,
+                              },
+                              {
+                                step: "4",
+                                title: "When you sell, you share the growth",
+                                body: "American Pledge's share of appreciation is designed to put you in a similar equity position as if you'd gotten a standard loan. The share is treated as contingent interest — not a second loan, no tax at closing.",
+                                color: C.orange,
+                              },
+                            ].map(({ step, title, body, color }) => (
+                              <Box key={step} sx={{ flex: "1 1 200px", minWidth: 180, display: "flex", gap: 1, alignItems: "flex-start" }}>
+                                <Box sx={{ width: 20, height: 20, borderRadius: "50%", background: color + "22", border: `1.5px solid ${color}44`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, mt: 0.1 }}>
+                                  <Typography sx={{ fontSize: 9, fontWeight: 800, color }}>{step}</Typography>
+                                </Box>
+                                <Box>
+                                  <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.charcoal, mb: 0.25 }}>{title}</Typography>
+                                  <Typography sx={{ fontSize: 9, color: C.muted, lineHeight: 1.6 }}>{body}</Typography>
+                                </Box>
+                              </Box>
+                            ))}
+                          </Box>
+
+                          {savings != null && (
+                            <Box sx={{ mt: 1.5, pt: 1.25, borderTop: `1px solid ${C.navy}18`, display: "flex", gap: 2, flexWrap: "wrap", alignItems: "center" }}>
+                              <Typography sx={{ fontSize: 9, color: C.muted }}>
+                                <strong style={{ color: C.greenLight }}>+${Math.round(savings * 60).toLocaleString()} saved over 5 years</strong> vs a standard {Math.round(stdDP * 100)}% down mortgage (lower payment + no PMI) ·{" "}
+                                <strong style={{ color: C.navy }}>$150/mo stewardship fee</strong> covers HAF + counseling — more than offset by savings
+                              </Typography>
+                            </Box>
+                          )}
+                        </CardContent>
+                      </Card>
+                      )}
+
                       {/* Market context */}
                       {county ? (
                         <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1, overflow: "hidden" }}>
@@ -4643,13 +5867,13 @@ const Dashboard = () => {
                               {county.name}, {county.state} · Market Context
                             </Typography>
                             <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.65)", mt: 0.25 }}>
-                              Ground Score rank #{county.rank} · {county.tier?.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
+                              Market Score rank #{county.rank} · {county.tier?.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase())}
                             </Typography>
                           </Box>
                           <CardContent sx={{ pb: "12px !important" }}>
                             {hpaOut && (
                               <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mb: 1.5 }}>
-                                <Box sx={{ flex: "0 0 110px", border: `1px solid ${hpaOut.color}44`, borderRadius: 1, p: 1, background: hpaOut.color + "18" }}>
+                                <Box sx={{ flex: "0 0 115px", border: `1px solid ${hpaOut.color}44`, borderRadius: 1, p: 1, background: hpaOut.color + "18" }}>
                                   <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
                                   <Typography sx={{ fontSize: 16, fontWeight: 700, color: hpaOut.color, lineHeight: 1.1 }}>
                                     {hpaOut.hpaLow >= 0 ? "+" : ""}{hpaOut.hpaLow}–{hpaOut.hpaHigh}%
@@ -4671,7 +5895,7 @@ const Dashboard = () => {
                             )}
                             <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
                               {[
-                                { label: "Ground Score", value: county.composite?.toFixed(1) },
+                                { label: "Market Score", value: county.composite?.toFixed(1) },
                                 { label: "1yr HPA", value: met.zhvi_growth_1yr != null ? `${(met.zhvi_growth_1yr * 100).toFixed(1)}%` : "—" },
                                 { label: "Median HHI", value: met.median_hhi ? `$${(met.median_hhi / 1000).toFixed(0)}k` : "—" },
                                 { label: "Unemployment", value: met.unemployment_rate != null ? `${met.unemployment_rate.toFixed(1)}%` : "—" },
@@ -4690,57 +5914,90 @@ const Dashboard = () => {
                         <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                           <CardContent>
                             <Typography sx={{ fontSize: 11, color: C.muted, p: 1 }}>
-                              County FIPS <strong>{result.fips}</strong> ({result.countyName}, {result.state}) was geocoded successfully but is not in the Ground Score universe. Load a market tab first to populate the dataset.
+                              County FIPS <strong>{result.fips}</strong> ({result.countyName}, {result.state}) was geocoded successfully but is not in the Market Score universe. Load a market tab first to populate the dataset.
                             </Typography>
                           </CardContent>
                         </Card>
                       )}
 
                       {/* Equity projections */}
-                      {price > 0 && (
+                      {price > 0 && (() => {
+                        // Blended forward HPA: 40% model implied midpoint + 60% trailing county ZHVI 1yr
+                        // Floored at 2%, capped at 8% — prevents unrealistically low projections
+                        // in strong-appreciation markets while still anchoring to the HPA Outlook signal.
+                        const _omid = hpaOut ? (hpaOut.hpaLow + hpaOut.hpaHigh) / 2 / 100 : null;
+                        const projHpa = _omid != null
+                          ? Math.min(Math.max(_omid * 0.4 + hpa * 0.6, 0.02), 0.08)
+                          : Math.min(Math.max(hpa * 0.7, 0.02), 0.08);
+
+                        // AP return share schedule (yr 1–10)
+                        const AP_RETURN_SHARE    = [0.46, 0.55, 0.65, 0.70, 0.75, 1.10, 2.00, 1.00, 1.00, 1.00];
+                        const AP_STEWARDSHIP_YR  = [900,  900,  900,  900,  900,  0,    0,    0,    0,    0   ];
+
+                        // Build cumulative AP tranche value year by year (compounds)
+                        const apTranche = [];   // apTranche[yr-1] = AP's total claim at end of yr
+                        let prevTranche = price * 0.20;  // AP initial contribution + buyer's 1% makes 20% down; AP tranche = full 20% block
+                        for (let yr = 1; yr <= 10; yr++) {
+                          const homeValPrev = price * Math.pow(1 + projHpa, yr - 1);
+                          const homeValNow  = price * Math.pow(1 + projHpa, yr);
+                          const annualAppreciation = homeValNow - homeValPrev;
+                          const returnShare = AP_RETURN_SHARE[yr - 1] ?? 1.0;
+                          const stewardship = AP_STEWARDSHIP_YR[yr - 1] ?? 0;
+                          prevTranche = prevTranche + (annualAppreciation * returnShare) + stewardship;
+                          apTranche.push(prevTranche);
+                        }
+
+                        const apLoan = price * 0.80;
+                        const stdLoan = price * (1 - stdDP);
+                        // Monthly savings: AP vs standard
+                        const monthlySavings = savings ?? 0;
+
+                        return (
                         <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                           <CardContent sx={{ pb: "12px !important" }}>
                             <SectionHeader
                               title="Equity &amp; Investment Outcome"
-                              sub={`${(hpa * 100).toFixed(1)}% avg annual HPA${county ? ` (${county.name})` : ""} · Standard: ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% down · AP: 20% down · AP appreciation share via fund schedule`}
+                              sub={`${hpaOut ? `${hpaOut.hpaLow}–${hpaOut.hpaHigh}% implied HPA range · ${((hpaOut.hpaLow + hpaOut.hpaHigh) / 2).toFixed(1)}% midpoint used` : `${(projHpa * 100).toFixed(1)}% HPA`}${county ? ` (${county.name})` : ""} · Standard: ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% down · AP: 1% buyer + 19% AP`}
                             />
-                            <Box sx={{ overflowX: "auto" }}>
+                            <Box sx={{ overflowX: "auto", maxWidth: "100%" }}>
                               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                                 <thead>
                                   <tr>
-                                    {["Hold Period", "Est. Value", "Appreciation", `Std ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% Bal.`, `Std Equity`, "AP Bal.", "AP Cap Rate", "AP Share Due", "Buyer Net Equity", "Advantage"].map(h => (
+                                    {[
+                                      "Year",
+                                      "Est. Value",
+                                      `Std ${stdDP === 0 ? "0" : (stdDP * 100 % 1 === 0 ? (stdDP * 100).toFixed(0) : (stdDP * 100).toFixed(1))}% Equity`,
+                                      "AP Return Share",
+                                      "AP Net Equity",
+                                      "AP Equity + Savings",
+                                      "vs Standard",
+                                    ].map(h => (
                                       <th key={h} style={{ padding: "6px 10px", textAlign: "left", fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
                                     ))}
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {[1, 2, 3, 5, 10].map((yr, i) => {
-                                    const futureVal    = price * Math.pow(1 + hpa, yr);
-                                    const appreciation = futureVal - price;
-                                    const cap          = CAP_SCHEDULE[yr - 1] ?? 1.0;
-                                    const apShareAmt   = appreciation * cap;
-
-                                    const stdLoan  = price * (1 - stdDP);
-                                    const stdBal   = remainingBalance(stdLoan, kalshiMtg, yr);
-                                    const stdEquity = futureVal - stdBal;
-
-                                    const apLoan   = price * 0.80;
-                                    const apBal    = remainingBalance(apLoan, kalshiMtg, yr);
-                                    const apNetEq  = (futureVal - apBal) - apShareAmt;
-                                    const equityAdv = apNetEq - stdEquity;
+                                  {Array.from({ length: 10 }, (_, i) => i + 1).map((yr, i) => {
+                                    const futureVal  = price * Math.pow(1 + projHpa, yr);
+                                    const stdBal     = remainingBalance(stdLoan, kalshiMtg, yr);
+                                    const stdEquity  = futureVal - stdBal;
+                                    const apBal      = remainingBalance(apLoan, kalshiMtg, yr);
+                                    const apShare    = apTranche[yr - 1];
+                                    const apNetEq    = futureVal - apBal - apShare;
+                                    const cumSavings = monthlySavings * 12 * yr;
+                                    const apPlusSav  = apNetEq + cumSavings;
+                                    const vsStd      = apPlusSav - stdEquity;
+                                    const returnSharePct = AP_RETURN_SHARE[yr - 1] ?? 1.0;
                                     return (
                                       <tr key={yr} style={{ background: i % 2 === 1 ? C.bg : C.white }}>
-                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: C.navy }}>{yr} yr</td>
+                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: C.navy }}>{yr}</td>
                                         <td style={{ padding: "8px 10px", color: C.charcoal }}>${Math.round(futureVal).toLocaleString()}</td>
-                                        <td style={{ padding: "8px 10px", color: C.greenLight, fontWeight: 600 }}>+${Math.round(appreciation).toLocaleString()}</td>
-                                        <td style={{ padding: "8px 10px", color: C.muted }}>${Math.round(stdBal).toLocaleString()}</td>
                                         <td style={{ padding: "8px 10px", fontWeight: 700, color: C.charcoal }}>${Math.round(stdEquity).toLocaleString()}</td>
-                                        <td style={{ padding: "8px 10px", color: C.muted }}>${Math.round(apBal).toLocaleString()}</td>
-                                        <td style={{ padding: "8px 10px", color: C.muted }}>{(cap * 100).toFixed(1)}%</td>
-                                        <td style={{ padding: "8px 10px", color: C.orange }}>-${Math.round(apShareAmt).toLocaleString()}</td>
-                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: C.orange }}>${Math.round(apNetEq).toLocaleString()}</td>
-                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: equityAdv >= 0 ? C.greenLight : "#e57373" }}>
-                                          {equityAdv >= 0 ? "+" : ""}${Math.round(equityAdv).toLocaleString()}
+                                        <td style={{ padding: "8px 10px", color: C.muted }}>{(returnSharePct * 100).toFixed(0)}%</td>
+                                        <td style={{ padding: "8px 10px", color: C.orange, fontWeight: 600 }}>${Math.round(apNetEq).toLocaleString()}</td>
+                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: C.navy }}>${Math.round(apPlusSav).toLocaleString()}</td>
+                                        <td style={{ padding: "8px 10px", fontWeight: 700, color: vsStd >= 0 ? C.greenLight : "#e57373" }}>
+                                          {vsStd >= 0 ? "+" : ""}${Math.round(vsStd).toLocaleString()}
                                         </td>
                                       </tr>
                                     );
@@ -4749,11 +6006,12 @@ const Dashboard = () => {
                               </table>
                             </Box>
                             <Typography sx={{ fontSize: 9, color: C.muted, mt: 1.5, lineHeight: 1.7 }}>
-                              AP Cap Rate follows the fund's schedule (yr 1: 46.7% → yr 5+: 100%). AP Net Equity = home value minus loan balance minus AP's appreciation share. Advantage = buyer's AP equity minus Standard equity at sale.
+                              AP Net Equity = home value − AP senior loan balance − AP's total return claim (initial tranche + compounding appreciation share + stewardship fees). AP Equity + Savings adds cumulative monthly payment savings vs the standard comparison loan. vs Standard = (AP Equity + Savings) minus standard loan equity at same year. Stewardship fee: $900/yr yrs 1–5, $0 thereafter.
                             </Typography>
                           </CardContent>
                         </Card>
-                      )}
+                        );
+                      })()}
 
                     </Box>
                   );
@@ -4761,6 +6019,7 @@ const Dashboard = () => {
 
               </Grid>
             </Grid>
+            </Box>
           );
         })()}
 
@@ -4801,64 +6060,83 @@ const Dashboard = () => {
                     const tabLabel = chartPane === "neopoli" ? "Activation Markets" : chartPane === "opportunity" ? "Expansion Markets" : chartPane === "formation" ? "Formation Markets" : "Engineered Markets";
                     const accentColor = chartPane === "neopoli" ? C.navy : chartPane === "opportunity" ? C.greenLight : chartPane === "formation" ? C.blue : C.orange;
                     const thesisMeta = {
-                      neopoli:     { entry: "Distressed basis", demand: "Catalyst event · Federal awards", ap: "Buyer pool expansion", hold: "3–5 years" },
-                      opportunity: { entry: "Greenfield MPC", demand: "Metro adjacency · HHI", ap: "Down payment program", hold: "5–7 years" },
-                      formation:   { entry: "Greenfield land assembly", demand: "In-migration · Pop growth", ap: "MPC buyer engine", hold: "7–10 years" },
-                      engineered:  { entry: "Pre-announcement land", demand: "Employer workforce", ap: "Workforce housing engine", hold: "10–15 years" },
+                      neopoli:     { entry: "Distressed basis", demand: "Catalyst event · Federal awards", ap: "Buyer pool expansion", hold: "3–5 years", entryKey: "thesis_entry_activation", demandKey: "thesis_demand_activation", apKey: "thesis_ap_activation", holdKey: "thesis_hold_activation" },
+                      opportunity: { entry: "Greenfield MPC", demand: "Metro adjacency · HHI", ap: "Down payment program", hold: "5–7 years", entryKey: "thesis_entry_expansion", demandKey: "thesis_demand_expansion", apKey: "thesis_ap_expansion", holdKey: "thesis_hold_expansion" },
+                      formation:   { entry: "Greenfield land assembly", demand: "In-migration · Pop growth", ap: "MPC buyer engine", hold: "7–10 years", entryKey: "thesis_entry_formation", demandKey: "thesis_demand_formation", apKey: "thesis_ap_formation", holdKey: "thesis_hold_formation" },
+                      engineered:  { entry: "Pre-announcement land", demand: "Employer workforce", ap: "Workforce housing engine", hold: "10–15 years", entryKey: "thesis_entry_engineered", demandKey: "thesis_demand_engineered", apKey: "thesis_ap_engineered", holdKey: "thesis_hold_engineered" },
                     }[chartPane];
+                    // Resolve which county list backs this tab
+                    const _tabSrc = (chartPane === "opportunity" || chartPane === "formation")
+                      ? groundScoreData?.expansion
+                      : groundScoreData?.activation;
+                    const _selectedCounty = _tabSrc?.find(c => c.fips === neopoliMarket) || _tabSrc?.[0];
                     return (
                     <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
-                      <Box
-                        sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 2, py: 1.25, borderBottom: showTabOverview ? `1px solid ${C.border}` : "none", cursor: "pointer" }}
-                        onClick={() => setShowTabOverview((v) => !v)}
-                      >
+                      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 2, py: 1.25, borderBottom: `1px solid ${C.border}` }}>
                         <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.09em" }}>
-                          Ground Score Market Intelligence · {tabLabel}
+                          Market Intelligence · {tabLabel}
                         </Typography>
-                        <span style={{ fontSize: 12, fontWeight: 600, color: C.navy, userSelect: "none", border: `1px solid ${C.navy}`, borderRadius: 4, background: "#dce4ec", padding: "3px 10px", cursor: "pointer" }}>
-                          {showTabOverview ? "HIDE" : "EXPAND"}
-                        </span>
                       </Box>
-                      {/* Collapsed: always show thesis quick-stats */}
-                      <Box sx={{ px: 2, py: 1, display: "flex", gap: 1, flexWrap: "wrap", borderBottom: showTabOverview ? `1px solid ${C.border}` : "none" }}>
+                      {/* Thesis quick-stats */}
+                      <Box sx={{ px: 2, py: 1, display: "flex", gap: 1, flexWrap: "wrap", borderBottom: `1px solid ${C.border}` }}>
                         {[
-                          { label: "Entry Strategy", val: thesisMeta.entry },
-                          { label: "Demand Driver", val: thesisMeta.demand },
-                          { label: "AP Role", val: thesisMeta.ap },
-                          { label: "Target Hold", val: thesisMeta.hold },
-                        ].map(({ label, val }) => (
-                          <Box key={label} sx={{ flex: "1 1 100px", minWidth: 95, border: `1px solid ${accentColor}22`, borderRadius: 1, px: 1, py: 0.6, background: accentColor + "08" }}>
-                            <Typography sx={{ fontSize: 8, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</Typography>
+                          { label: "Entry Strategy", val: thesisMeta.entry, mk: thesisMeta.entryKey },
+                          { label: "Demand Driver", val: thesisMeta.demand, mk: thesisMeta.demandKey },
+                          { label: "AP Role", val: thesisMeta.ap, mk: thesisMeta.apKey },
+                          { label: "Target Hold", val: thesisMeta.hold, mk: thesisMeta.holdKey },
+                        ].map(({ label, val, mk }) => (
+                          <Box key={label} onClick={() => mk && setActiveMetricKey(mk)} sx={{ flex: "1 1 100px", minWidth: 95, border: `1px solid ${accentColor}22`, borderRadius: 1, px: 1, py: 0.6, background: accentColor + "08", cursor: "pointer", "&:hover": { background: accentColor + "18", borderColor: accentColor + "55" } }}>
+                            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                              <Typography sx={{ fontSize: 8, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</Typography>
+                              <Typography sx={{ fontSize: 7, color: accentColor, opacity: 0.5, lineHeight: 1 }}>ⓘ</Typography>
+                            </Box>
                             <Typography sx={{ fontSize: 10, fontWeight: 700, color: accentColor, mt: 0.2, lineHeight: 1.3 }}>{val}</Typography>
                           </Box>
                         ))}
                       </Box>
-                      {showTabOverview && (
-                        <CardContent sx={{ pb: "12px !important" }}>
-                          <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      <CardContent sx={{ pb: "12px !important" }}>
+                        <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          {/* Orientation intro */}
+                          {_selectedCounty && (
+                            <Box sx={{ background: accentColor + "08", border: `1px solid ${accentColor}22`, borderRadius: 1, px: 1.5, py: 1.25 }}>
+                              <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
+                                You're viewing{" "}
+                                <span style={{ fontWeight: 700, color: C.charcoal }}>{_selectedCounty.name}, {_selectedCounty.state}</span>
+                                {" "}— ranked{" "}
+                                <span style={{ fontWeight: 700, color: accentColor }}>#{_selectedCounty.rank}</span>
+                                {" "}in {tabLabel}.
+                                {_selectedCounty.rank === 1
+                                  ? " This is the top-ranked market loaded by default."
+                                  : " You selected this market from the map or ranking table."}
+                                {" "}Use the{" "}
+                                <span style={{ fontWeight: 600, color: C.charcoal }}>map</span> or{" "}
+                                <span style={{ fontWeight: 600, color: C.charcoal }}>Market Score ranking table</span>
+                                {" "}to explore any other market in the coverage area and compare its deep-dive analysis here.
+                              </Typography>
+                            </Box>
+                          )}
                             {/* Platform context */}
                             <Box>
                               <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.09em", mb: 0.75 }}>
-                                Ground Score Market Intelligence
+                                Market Intelligence
                               </Typography>
                               <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
-                                Ground Score Market Intelligence is location-intelligence based on market Ground Scores for identifying where capital deployment will generate the most durable, long-term returns. It uses deterministic scoring across economic, demographic, infrastructure, and market-readiness dimensions to surface markets that the broader investment community has not yet priced correctly — either because they are overlooked, misunderstood, or simply too early. Four complementary strategies operate within the platform, each targeting a different type of market opportunity and a different investment product.
+                                Market Intelligence is location-based scoring for identifying where capital deployment will generate the most durable, long-term returns. It uses deterministic scoring across economic, demographic, infrastructure, and market-readiness dimensions to surface markets that the broader investment community has not yet priced correctly — either because they are overlooked, misunderstood, or simply too early. Four complementary strategies operate within the platform, each targeting a different type of market opportunity and a different investment product.
                               </Typography>
                             </Box>
                             {/* Strategy detail */}
                             <Box sx={{ pt: 1.5, borderTop: `1px solid ${C.border}` }}>
                               <Typography sx={{ fontSize: 10, fontWeight: 800, color: accentColor, textTransform: "uppercase", letterSpacing: "0.09em", mb: 0.75 }}>
-                                {tabLabel}
+                                {tabLabel} Thesis
                               </Typography>
                               {chartPane === "neopoli" && (
                                 <>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
-                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
                                     Target distressed secondary and tertiary markets ahead of catalyst events. Entry cost is low by design — economic dislocation creates acquisition basis. When the catalyst fires (employer anchor, federal infrastructure award, OZ deployment), appreciation accrues to early-positioned capital. American Pledge's 20% down payment program expands the qualified buyer pool in markets where affordability is the primary barrier, accelerating exit.
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
-                                    Markets where current pricing still reflects the distressed baseline rather than the coming transformation. Ground Score screens for the convergence of cost advantage, distress depth, momentum signals, and catalyst evidence — the combination that historically precedes a breakout.
+                                    Markets where current pricing still reflects the distressed baseline rather than the coming transformation. The model screens for the convergence of cost advantage, distress depth, momentum signals, and catalyst evidence — the combination that historically precedes a breakout.
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>Investment strategy — </span>
@@ -4873,7 +6151,6 @@ const Dashboard = () => {
                               {chartPane === "opportunity" && (
                                 <>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
-                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
                                     Target metro-fringe counties with strong household income, land availability, and proximity to major employment centers. These markets are primed for master-planned community development where American Pledge's down payment program is the decisive lever: converting a large pool of qualified-income households into first-time buyers.
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
@@ -4893,7 +6170,6 @@ const Dashboard = () => {
                               {chartPane === "formation" && (
                                 <>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
-                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
                                     Identify greenfield corridors where demographic momentum, low land cost, and development-ready infrastructure converge — before institutional capital arrives. Formation markets are growth corridors at early inflection where a master-planned community with the American Pledge program creates the demand ecosystem from the ground up.
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
@@ -4913,8 +6189,7 @@ const Dashboard = () => {
                               {chartPane === "engineered" && (
                                 <>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
-                                    <span style={{ fontWeight: 700, color: C.charcoal }}>Thesis — </span>
-                                    Employer-first site acquisition ahead of public announcement. When the family office brings an employer anchor to a market, it creates a designed demand ecosystem: the employer generates the workforce, American Pledge converts that workforce into buyers, and the adjacent MPC captures the housing demand. This is not market selection — it is market creation.
+                                    Employer-first site acquisition ahead of public announcement. When an employer anchor is brought to market, it creates a designed demand ecosystem: the employer generates the workforce, American Pledge converts that workforce into buyers, and the adjacent MPC captures the housing demand. This is not market selection — it is market creation.
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
@@ -4922,7 +6197,7 @@ const Dashboard = () => {
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>Investment strategy — </span>
-                                    Acquire land around the future employer site before the announcement. Build the workforce housing community in parallel with employer construction. AP program converts the arriving workforce into buyers at scale, generating absorption velocity no speculative development could match.
+                                    Land is positioned around the future employer site ahead of public announcement. Workforce housing is developed in parallel with employer construction. The AP program converts the arriving workforce into buyers at scale, generating absorption velocity no speculative development could match.
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>Scoring model —</span>
@@ -4933,7 +6208,6 @@ const Dashboard = () => {
                             </Box>
                           </Box>
                         </CardContent>
-                      )}
                     </Card>
                     );
                   })()}
@@ -5274,7 +6548,7 @@ const Dashboard = () => {
                     </Card>
                   )}
 
-                  {/* Ground Score County Map — Activation */}
+                  {/* Market Score County Map — Activation */}
                   {chartPane === "neopoli" && (
                     <Box
                       sx={{ display: "flex", gap: 2, alignItems: "stretch" }}
@@ -5297,7 +6571,7 @@ const Dashboard = () => {
                             }}
                           >
                             <SectionHeader
-                              title="Ground Score Yield Map"
+                              title="Market Score Yield Map"
                               sub="All 3,100+ US counties"
                             />
                             <SearchBox
@@ -5408,9 +6682,25 @@ const Dashboard = () => {
                                   (a, b) =>
                                     (b.composite || 0) - (a.composite || 0),
                                 );
+                              // Fallback: use placesIndex cities when county has no pre-scored cities
+                              const allKnownFips = new Set([...preScoredFips, ...demandCities.map(c => c.place_fips)]);
+                              const indexFallback = (preScoredCities.length === 0 && demandCities.length === 0 && placesIndex && m)
+                                ? (() => {
+                                    const raw = placesIndex.filter(p => p.county_fips === m.fips && !allKnownFips.has(p.place_fips));
+                                    const maxPop = Math.max(...raw.map(c => c.population || 0), 1);
+                                    return raw.map(c => ({
+                                      ...c,
+                                      composite: Math.round(((c.population || 0) / maxPop) * 100),
+                                      // normalize metrics into expected nested structure for scorecard
+                                      metrics: { zhvi_latest: c.zhvi_latest, zhvi_growth_1yr: c.zhvi_growth_1yr },
+                                      dims: {},
+                                    }));
+                                  })()
+                                : [];
                               const cities = [
                                 ...preScoredCities,
                                 ...demandCities,
+                                ...indexFallback,
                               ];
                               return (
                                 <>
@@ -5463,7 +6753,7 @@ const Dashboard = () => {
                     </Box>
                   )}
 
-                  {/* Ground Score Market Rankings — Activation */}
+                  {/* Market Score Market Rankings — Activation */}
                   {chartPane === "neopoli" && (
                     <Card
                       elevation={0}
@@ -5471,7 +6761,7 @@ const Dashboard = () => {
                     >
                       <CardContent sx={{ pb: "12px !important" }}>
                         <SectionHeader
-                          title="Ground Score Rankings"
+                          title="Market Score Rankings"
                           sub={
                             groundScoreData
                               ? `Activation Dimensions · ${groundScoreData.activation.length.toLocaleString()} counties scored · ${groundScoreData.generated} · click a county to load its scorecard`
@@ -5517,7 +6807,7 @@ const Dashboard = () => {
                                           "#",
                                           "County",
                                           "State",
-                                          "Ground Score",
+                                          "Market Score",
                                           "Tier",
                                           "HPA Outlook",
                                         ].map((h) => (
@@ -5838,7 +7128,7 @@ const Dashboard = () => {
                           <span style={{ fontWeight: 600 }}>
                             Composite &amp; Dimension Scores:
                           </span>{" "}
-                          Ground Score pipeline · {groundScoreData.generated} ·
+                          Market Score pipeline · {groundScoreData.generated} ·
                           Census ACS 2022 · BLS QCEW 2022 · Zillow ZHVI · FEMA
                           NRI · USDA NASS 2017 · FCC BDC · USASpending.gov
                           FY2024 · HUD Opportunity Zones · NCES EDFacts
@@ -5852,7 +7142,7 @@ const Dashboard = () => {
                     </Card>
                   )}
 
-                  {/* Ground Score County Map — Expansion */}
+                  {/* Market Score County Map — Expansion */}
                   {chartPane === "opportunity" && (
                     <Box
                       sx={{ display: "flex", gap: 2, alignItems: "stretch" }}
@@ -5875,7 +7165,7 @@ const Dashboard = () => {
                             }}
                           >
                             <SectionHeader
-                              title="Ground Score Yield Map"
+                              title="Market Score Yield Map"
                               sub="All 3,100+ US counties"
                             />
                             <SearchBox
@@ -5991,9 +7281,25 @@ const Dashboard = () => {
                                   (a, b) =>
                                     (b.composite || 0) - (a.composite || 0),
                                 );
+                              // Fallback: use placesIndex cities when county has no pre-scored cities
+                              const allKnownFips = new Set([...preScoredFips, ...demandCities.map(c => c.place_fips)]);
+                              const indexFallback = (preScoredCities.length === 0 && demandCities.length === 0 && placesIndex && m)
+                                ? (() => {
+                                    const raw = placesIndex.filter(p => p.county_fips === m.fips && !allKnownFips.has(p.place_fips));
+                                    const maxPop = Math.max(...raw.map(c => c.population || 0), 1);
+                                    return raw.map(c => ({
+                                      ...c,
+                                      composite: Math.round(((c.population || 0) / maxPop) * 100),
+                                      // normalize metrics into expected nested structure for scorecard
+                                      metrics: { zhvi_latest: c.zhvi_latest, zhvi_growth_1yr: c.zhvi_growth_1yr },
+                                      dims: {},
+                                    }));
+                                  })()
+                                : [];
                               const cities = [
                                 ...preScoredCities,
                                 ...demandCities,
+                                ...indexFallback,
                               ];
                               return (
                                 <>
@@ -6046,7 +7352,7 @@ const Dashboard = () => {
                     </Box>
                   )}
 
-                  {/* Ground Score Market Rankings — Expansion */}
+                  {/* Market Score Market Rankings — Expansion */}
                   {chartPane === "opportunity" && (
                     <Card
                       elevation={0}
@@ -6054,7 +7360,7 @@ const Dashboard = () => {
                     >
                       <CardContent sx={{ pb: "12px !important" }}>
                         <SectionHeader
-                          title="Ground Score Rankings"
+                          title="Market Score Rankings"
                           sub={
                             groundScoreData
                               ? `Expansion Dimensions · ${groundScoreData.expansion.length.toLocaleString()} counties scored · ${groundScoreData.generated} · click a county to load its scorecard`
@@ -6100,7 +7406,7 @@ const Dashboard = () => {
                                           "#",
                                           "County",
                                           "State",
-                                          "Ground Score",
+                                          "Market Score",
                                           "Tier",
                                           "HPA Outlook",
                                         ].map((h) => (
@@ -6421,7 +7727,7 @@ const Dashboard = () => {
                           <span style={{ fontWeight: 600 }}>
                             Composite &amp; Dimension Scores:
                           </span>{" "}
-                          Ground Score pipeline · {groundScoreData.generated} ·
+                          Market Score pipeline · {groundScoreData.generated} ·
                           Census ACS 2022 · BLS QCEW 2022 · Zillow ZHVI · FEMA
                           NRI · USDA NASS 2017 · Amazon Location Service drive
                           times · FCC BDC · USASpending.gov FY2024 · HUD
@@ -6435,7 +7741,7 @@ const Dashboard = () => {
                     </Card>
                   )}
 
-                  {/* Ground Score County Map — Formation */}
+                  {/* Market Score County Map — Formation */}
                   {chartPane === "formation" && (
                     <Box sx={{ display: "flex", gap: 2, alignItems: "stretch" }}>
                       <Card
@@ -6445,7 +7751,7 @@ const Dashboard = () => {
                         <CardContent sx={{ pb: "12px !important" }}>
                           <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", mb: 1 }}>
                             <SectionHeader
-                              title="Ground Score Yield Map"
+                              title="Market Score Yield Map"
                               sub="All 3,100+ US counties · Formation scoring"
                             />
                             <SearchBox
@@ -6464,7 +7770,7 @@ const Dashboard = () => {
                             />
                           </Box>
                           <CountyMap
-                            counties={groundScoreData?.activation}
+                            counties={formationCounties}
                             selectedFips={formationSelectedFips}
                             thesis="activation"
                             zoom={mapZoom}
@@ -6526,12 +7832,12 @@ const Dashboard = () => {
                     </Box>
                   )}
 
-                  {/* Ground Score Market Rankings — Formation */}
+                  {/* Market Score Market Rankings — Formation */}
                   {chartPane === "formation" && (
                     <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                       <CardContent sx={{ pb: "12px !important" }}>
                         <SectionHeader
-                          title="Ground Score Rankings"
+                          title="Market Score Rankings"
                           sub={groundScoreData
                             ? `Formation Dimensions · ${groundScoreData.activation.length.toLocaleString()} counties scored · click a county to load its profile`
                             : "Formation Dimensions scoring · loading..."}
@@ -6554,7 +7860,7 @@ const Dashboard = () => {
                                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                                   <thead>
                                     <tr>
-                                      {["#", "County", "State", "Ground Score", "Tier", "HPA Outlook"].map(h => (
+                                      {["#", "County", "State", "Market Score", "Tier", "HPA Outlook"].map(h => (
                                         <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
                                       ))}
                                     </tr>
@@ -6590,10 +7896,14 @@ const Dashboard = () => {
                                   </tbody>
                                 </table>
                               </Box>
-                              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1, pt: 0.75, borderTop: `1px solid ${C.border}` }}>
-                                <button onClick={() => setFormationPage(p => Math.max(0, p - 1))} disabled={page === 0} style={{ fontSize: 10, padding: "3px 10px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>← Prev</button>
-                                <Typography sx={{ fontSize: 9, color: C.muted }}>Page {page + 1} / {totalPages}</Typography>
-                                <button onClick={() => setFormationPage(p => Math.min(totalPages - 1, p + 1))} disabled={page === totalPages - 1} style={{ fontSize: 10, padding: "3px 10px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: C.muted, cursor: page === totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>Next →</button>
+                              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mt: 1.5, pt: 1, borderTop: `1px solid ${C.border}` }}>
+                                <Typography sx={{ fontSize: 10, color: C.muted }}>Page {page + 1} of {totalPages} · {allCounties.length.toLocaleString()} counties</Typography>
+                                <Box sx={{ display: "flex", gap: 0.75 }}>
+                                  <button onClick={() => setFormationPage(0)} disabled={page === 0} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page === 0 ? C.border : C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>«</button>
+                                  <button onClick={() => setFormationPage(p => Math.max(0, p - 1))} disabled={page === 0} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page === 0 ? C.border : C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>‹ Prev</button>
+                                  <button onClick={() => setFormationPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page >= totalPages - 1 ? C.border : C.muted, cursor: page >= totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>Next ›</button>
+                                  <button onClick={() => setFormationPage(totalPages - 1)} disabled={page >= totalPages - 1} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page >= totalPages - 1 ? C.border : C.muted, cursor: page >= totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>»</button>
+                                </Box>
                               </Box>
                             </>
                           );
@@ -6602,7 +7912,20 @@ const Dashboard = () => {
                     </Card>
                   )}
 
-                  {/* Ground Score County Map — Engineered */}
+                  {/* Data sources — Formation */}
+                  {chartPane === "formation" && groundScoreData && (
+                    <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                      <CardContent sx={{ pb: "12px !important" }}>
+                        <Typography sx={{ fontSize: 9, color: C.muted, lineHeight: 1.7, letterSpacing: "0.02em" }}>
+                          <span style={{ fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Data Sources — </span>
+                          <span style={{ fontWeight: 600 }}>Formation Score:</span>{" "}
+                          Market Score pipeline · {groundScoreData.generated} · Census ACS 2022 · BLS QCEW 2022 · Zillow ZHVI · USDA NASS 2017 · Census Building Permits 2022 · Amazon Location Service drive times · scoring mode: universe-relative percentile (0–100 within {groundScoreData.activation.length.toLocaleString()}-county universe).
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Market Score County Map — Engineered */}
                   {chartPane === "engineered" && (
                     <Box sx={{ display: "flex", gap: 2, alignItems: "stretch" }}>
                       <Card
@@ -6612,7 +7935,7 @@ const Dashboard = () => {
                         <CardContent sx={{ pb: "12px !important" }}>
                           <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", mb: 1 }}>
                             <SectionHeader
-                              title="Ground Score Yield Map"
+                              title="Market Score Yield Map"
                               sub="All 3,100+ US counties · Engineered scoring"
                             />
                             <SearchBox
@@ -6631,7 +7954,7 @@ const Dashboard = () => {
                             />
                           </Box>
                           <CountyMap
-                            counties={groundScoreData?.activation}
+                            counties={engineeredCounties}
                             selectedFips={engineeredSelectedFips}
                             thesis="activation"
                             zoom={mapZoom}
@@ -6693,12 +8016,12 @@ const Dashboard = () => {
                     </Box>
                   )}
 
-                  {/* Ground Score Market Rankings — Engineered */}
+                  {/* Market Score Market Rankings — Engineered */}
                   {chartPane === "engineered" && (
                     <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                       <CardContent sx={{ pb: "12px !important" }}>
                         <SectionHeader
-                          title="Ground Score Rankings"
+                          title="Market Score Rankings"
                           sub={groundScoreData
                             ? `Engineered Site Optimizer · ${groundScoreData.activation.length.toLocaleString()} counties scored · click a county to load its profile`
                             : "Engineered site scoring · loading..."}
@@ -6721,7 +8044,7 @@ const Dashboard = () => {
                                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                                   <thead>
                                     <tr>
-                                      {["#", "County", "State", "Ground Score", "Tier", "HPA Outlook"].map(h => (
+                                      {["#", "County", "State", "Market Score", "Tier", "HPA Outlook"].map(h => (
                                         <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
                                       ))}
                                     </tr>
@@ -6757,14 +8080,31 @@ const Dashboard = () => {
                                   </tbody>
                                 </table>
                               </Box>
-                              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 1, pt: 0.75, borderTop: `1px solid ${C.border}` }}>
-                                <button onClick={() => setEngineeredPage(p => Math.max(0, p - 1))} disabled={page === 0} style={{ fontSize: 10, padding: "3px 10px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>← Prev</button>
-                                <Typography sx={{ fontSize: 9, color: C.muted }}>Page {page + 1} / {totalPages}</Typography>
-                                <button onClick={() => setEngineeredPage(p => Math.min(totalPages - 1, p + 1))} disabled={page === totalPages - 1} style={{ fontSize: 10, padding: "3px 10px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: C.muted, cursor: page === totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>Next →</button>
+                              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mt: 1.5, pt: 1, borderTop: `1px solid ${C.border}` }}>
+                                <Typography sx={{ fontSize: 10, color: C.muted }}>Page {page + 1} of {totalPages} · {allCounties.length.toLocaleString()} counties</Typography>
+                                <Box sx={{ display: "flex", gap: 0.75 }}>
+                                  <button onClick={() => setEngineeredPage(0)} disabled={page === 0} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page === 0 ? C.border : C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>«</button>
+                                  <button onClick={() => setEngineeredPage(p => Math.max(0, p - 1))} disabled={page === 0} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page === 0 ? C.border : C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>‹ Prev</button>
+                                  <button onClick={() => setEngineeredPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page >= totalPages - 1 ? C.border : C.muted, cursor: page >= totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>Next ›</button>
+                                  <button onClick={() => setEngineeredPage(totalPages - 1)} disabled={page >= totalPages - 1} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page >= totalPages - 1 ? C.border : C.muted, cursor: page >= totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>»</button>
+                                </Box>
                               </Box>
                             </>
                           );
                         })()}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Data sources — Engineered */}
+                  {chartPane === "engineered" && groundScoreData && (
+                    <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                      <CardContent sx={{ pb: "12px !important" }}>
+                        <Typography sx={{ fontSize: 9, color: C.muted, lineHeight: 1.7, letterSpacing: "0.02em" }}>
+                          <span style={{ fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Data Sources — </span>
+                          <span style={{ fontWeight: 600 }}>Engineered Score:</span>{" "}
+                          Market Score pipeline · {groundScoreData.generated} · Census ACS 2022 · BLS QCEW 2022 · Zillow ZHVI · USDA NASS 2017 · FCC BDC · Amazon Location Service drive times · scoring mode: universe-relative percentile (0–100 within {groundScoreData.activation.length.toLocaleString()}-county universe).
+                        </Typography>
                       </CardContent>
                     </Card>
                   )}
@@ -8522,7 +9862,7 @@ const Dashboard = () => {
                                   letterSpacing: "0.09em",
                                 }}
                               >
-                                Ground Score · Scoring Methodology
+                                Market Score · Scoring Methodology
                               </Typography>
                               <Typography
                                 sx={{
@@ -10130,7 +11470,7 @@ const Dashboard = () => {
                     </Box>
                   )}
 
-                  {/* ── Ground Score Data ── */}
+                  {/* ── Market Score Data ── */}
                   {chartPane === "neopoli" && (
                     <Box
                       sx={{
@@ -10165,7 +11505,7 @@ const Dashboard = () => {
                               textTransform: "uppercase",
                             }}
                           >
-                            Loading Ground Score Intelligence
+                            Loading Market Intelligence
                           </Typography>
                         </Box>
                       )}
@@ -10313,8 +11653,11 @@ const Dashboard = () => {
                                         HPA Outlook · 5-signal composite
                                       </Typography>
                                       <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-                                        <Box sx={{ flex: "0 0 100px", minWidth: 95, border: `1px solid ${hpa.color}44`, borderRadius: 1, p: 1, background: hpa.color + "18" }}>
-                                          <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
+                                        <Box onClick={() => setActiveMetricKey("hpa_range")} sx={{ flex: "0 0 115px", minWidth: 115, border: `1px solid ${hpa.color}44`, borderRadius: 1, p: 1, background: hpa.color + "18", cursor: "pointer", "&:hover": { background: hpa.color + "28" } }}>
+                                          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                            <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
+                                            <Typography sx={{ fontSize: 8, color: hpa.color, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>
+                                          </Box>
                                           <Typography sx={{ fontSize: 16, fontWeight: 700, color: hpa.color, lineHeight: 1.1 }}>
                                             {hpa.hpaLow >= 0 ? "+" : ""}{hpa.hpaLow}-{hpa.hpaHigh}%
                                           </Typography>
@@ -10322,10 +11665,16 @@ const Dashboard = () => {
                                           <Typography sx={{ fontSize: 9, fontWeight: 700, color: hpa.color, mt: 0.25 }}>{hpa.label}</Typography>
                                         </Box>
                                         {hpa.drivers.map((d) => {
-                                          const dc = d.score >= 0.6 ? C.greenLight : d.score >= 0.35 ? "#f0a500" : "#e57373";
+                                          const _poolPct = d.key === "buyer_pool" ? parseInt(d.value) : null;
+                                          const dc = _poolPct != null
+                                            ? (_poolPct > 50 ? "#4ade80" : _poolPct > 40 ? "#86efac" : _poolPct > 30 ? "#fbbf24" : _poolPct > 20 ? "#f97316" : "#f87171")
+                                            : (d.score >= 0.6 ? C.greenLight : d.score >= 0.35 ? "#f0a500" : "#e57373");
                                           return (
-                                            <Box key={d.key} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d" }}>
-                                              <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                            <Box key={d.key} onClick={() => setActiveMetricKey(d.key)} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${dc}88`, borderRadius: 1, p: 1, background: dc + "0d", cursor: "pointer", "&:hover": { background: dc + "18" } }}>
+                                              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                                <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                                {METRIC_INFO[d.key] && <Typography sx={{ fontSize: 8, color: dc, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>}
+                                              </Box>
                                               <Typography sx={{ fontSize: 13, fontWeight: 700, color: dc, lineHeight: 1.1 }}>
                                                 {d.value ?? "—"}
                                               </Typography>
@@ -10337,11 +11686,10 @@ const Dashboard = () => {
                                     </Box>
                                   );
                                 })()}
+                                {renderAffordabilityBanner(m.metrics, m.population)}
                                 {deepDives[`activation:${m.fips}`] ? (
                                   <Box sx={{ mb: 1.5 }}>
-                                    {renderDeepDive(
-                                      deepDives[`activation:${m.fips}`],
-                                    )}
+                                    {renderDeepDive(deepDives[`activation:${m.fips}`])}
                                   </Box>
                                 ) : (
                                   <Typography
@@ -10356,20 +11704,30 @@ const Dashboard = () => {
                                   </Typography>
                                 )}
                                 {(() => {
+                                  const _plCity = (fips) => {
+                                    const raw = fips && placesIndex?.find(p => p.place_fips === fips && p.county_fips === m?.fips);
+                                    return raw ? { ...raw, metrics: { zhvi_latest: raw.zhvi_latest, zhvi_growth_1yr: raw.zhvi_growth_1yr }, dims: {} } : null;
+                                  };
                                   const selCity =
                                     m.cities?.find(
                                       (c) => c.place_fips === selectedCityFips,
                                     ) ||
                                     onDemandCities[selectedCityFips] ||
-                                    m.cities?.[0];
+                                    _plCity(selectedCityFips) ||
+                                    m.cities?.[0] ||
+                                    (() => { const raw = placesIndex?.find(p => p.county_fips === m?.fips); return raw ? { ...raw, metrics: { zhvi_latest: raw.zhvi_latest, zhvi_growth_1yr: raw.zhvi_growth_1yr }, dims: {} } : null; })();
                                   if (!selCity) return null;
                                   const met = selCity.metrics || {};
                                   const statRows = [
                                     [
-                                      "Ground Score",
-                                      selCity.composite != null
+                                      "Market Score",
+                                      (selCity.composite != null && Object.keys(selCity.dims || {}).length > 0)
                                         ? selCity.composite.toFixed(1)
                                         : null,
+                                    ],
+                                    [
+                                      "Population",
+                                      selCity.population ? selCity.population.toLocaleString() : null,
                                     ],
                                     [
                                       "Median HHI",
@@ -10870,7 +12228,7 @@ const Dashboard = () => {
                             >
                               <CardContent sx={{ pb: "12px !important" }}>
                                 <SectionHeader
-                                  title="City Ground Score Rankings"
+                                  title="City Market Score Rankings"
                                   sub={`${m.name}, ${m.state} · top cities by Activation composite · scored within county universe`}
                                 />
                                 <table
@@ -10885,7 +12243,7 @@ const Dashboard = () => {
                                       {[
                                         "#",
                                         "City",
-                                        "Ground Score",
+                                        "Market Score",
                                         "Entry Cost",
                                         "Distress",
                                         "Housing Supply",
@@ -11996,7 +13354,7 @@ const Dashboard = () => {
                               textTransform: "uppercase",
                             }}
                           >
-                            Loading Ground Score Intelligence
+                            Loading Market Intelligence
                           </Typography>
                         </Box>
                       )}
@@ -12143,8 +13501,11 @@ const Dashboard = () => {
                                         HPA Outlook · 5-signal composite
                                       </Typography>
                                       <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-                                        <Box sx={{ flex: "0 0 100px", minWidth: 95, border: `1px solid ${hpa.color}44`, borderRadius: 1, p: 1, background: hpa.color + "18" }}>
-                                          <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
+                                        <Box onClick={() => setActiveMetricKey("hpa_range")} sx={{ flex: "0 0 115px", minWidth: 115, border: `1px solid ${hpa.color}44`, borderRadius: 1, p: 1, background: hpa.color + "18", cursor: "pointer", "&:hover": { background: hpa.color + "28" } }}>
+                                          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                            <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
+                                            <Typography sx={{ fontSize: 8, color: hpa.color, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>
+                                          </Box>
                                           <Typography sx={{ fontSize: 16, fontWeight: 700, color: hpa.color, lineHeight: 1.1 }}>
                                             {hpa.hpaLow >= 0 ? "+" : ""}{hpa.hpaLow}-{hpa.hpaHigh}%
                                           </Typography>
@@ -12152,10 +13513,16 @@ const Dashboard = () => {
                                           <Typography sx={{ fontSize: 9, fontWeight: 700, color: hpa.color, mt: 0.25 }}>{hpa.label}</Typography>
                                         </Box>
                                         {hpa.drivers.map((d) => {
-                                          const dc = d.score >= 0.6 ? C.greenLight : d.score >= 0.35 ? "#f0a500" : "#e57373";
+                                          const _poolPct = d.key === "buyer_pool" ? parseInt(d.value) : null;
+                                          const dc = _poolPct != null
+                                            ? (_poolPct > 50 ? "#4ade80" : _poolPct > 40 ? "#86efac" : _poolPct > 30 ? "#fbbf24" : _poolPct > 20 ? "#f97316" : "#f87171")
+                                            : (d.score >= 0.6 ? C.greenLight : d.score >= 0.35 ? "#f0a500" : "#e57373");
                                           return (
-                                            <Box key={d.key} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d" }}>
-                                              <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                            <Box key={d.key} onClick={() => setActiveMetricKey(d.key)} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${dc}88`, borderRadius: 1, p: 1, background: dc + "0d", cursor: "pointer", "&:hover": { background: dc + "18" } }}>
+                                              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                                <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                                {METRIC_INFO[d.key] && <Typography sx={{ fontSize: 8, color: dc, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>}
+                                              </Box>
                                               <Typography sx={{ fontSize: 13, fontWeight: 700, color: dc, lineHeight: 1.1 }}>
                                                 {d.value ?? "—"}
                                               </Typography>
@@ -12167,11 +13534,10 @@ const Dashboard = () => {
                                     </Box>
                                   );
                                 })()}
+                                {renderAffordabilityBanner(m.metrics, m.population)}
                                 {deepDives[`expansion:${m.fips}`] ? (
                                   <Box sx={{ mb: 1.5 }}>
-                                    {renderDeepDive(
-                                      deepDives[`expansion:${m.fips}`],
-                                    )}
+                                    {renderDeepDive(deepDives[`expansion:${m.fips}`])}
                                   </Box>
                                 ) : (
                                   <Typography
@@ -12186,20 +13552,30 @@ const Dashboard = () => {
                                   </Typography>
                                 )}
                                 {(() => {
+                                  const _plCity = (fips) => {
+                                    const raw = fips && placesIndex?.find(p => p.place_fips === fips && p.county_fips === m?.fips);
+                                    return raw ? { ...raw, metrics: { zhvi_latest: raw.zhvi_latest, zhvi_growth_1yr: raw.zhvi_growth_1yr }, dims: {} } : null;
+                                  };
                                   const selCity =
                                     m.cities?.find(
                                       (c) => c.place_fips === selectedCityFips,
                                     ) ||
                                     onDemandCities[selectedCityFips] ||
-                                    m.cities?.[0];
+                                    _plCity(selectedCityFips) ||
+                                    m.cities?.[0] ||
+                                    (() => { const raw = placesIndex?.find(p => p.county_fips === m?.fips); return raw ? { ...raw, metrics: { zhvi_latest: raw.zhvi_latest, zhvi_growth_1yr: raw.zhvi_growth_1yr }, dims: {} } : null; })();
                                   if (!selCity) return null;
                                   const met = selCity.metrics || {};
                                   const statRows = [
                                     [
-                                      "Ground Score",
-                                      selCity.composite != null
+                                      "Market Score",
+                                      (selCity.composite != null && Object.keys(selCity.dims || {}).length > 0)
                                         ? selCity.composite.toFixed(1)
                                         : null,
+                                    ],
+                                    [
+                                      "Population",
+                                      selCity.population ? selCity.population.toLocaleString() : null,
                                     ],
                                     [
                                       "Median HHI",
@@ -12701,7 +14077,7 @@ const Dashboard = () => {
                             >
                               <CardContent sx={{ pb: "12px !important" }}>
                                 <SectionHeader
-                                  title="City Ground Score Rankings"
+                                  title="City Market Score Rankings"
                                   sub={`${m.name}, ${m.state} · top cities by Expansion composite · scored within county universe`}
                                 />
                                 <table
@@ -12716,7 +14092,7 @@ const Dashboard = () => {
                                       {[
                                         "#",
                                         "City",
-                                        "Ground Score",
+                                        "Market Score",
                                         "Entry Cost",
                                         "Buyer Quality",
                                         "Housing Momentum",
@@ -13760,7 +15136,7 @@ const Dashboard = () => {
                     if (!groundScoreData) return groundScoreLoading ? (
                       <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, pt: 6 }}>
                         <l-helix size="60" speed="2.5" color={C.navy}></l-helix>
-                        <Typography sx={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Loading Ground Score Intelligence</Typography>
+                        <Typography sx={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Loading Market Intelligence</Typography>
                       </Box>
                     ) : null;
                     const allCounties = [...groundScoreData.activation]
@@ -13802,8 +15178,11 @@ const Dashboard = () => {
                               {fs.dims.map(d => {
                                 const dc = d.score >= 0.65 ? C.greenLight : d.score >= 0.38 ? "#f0a500" : "#e57373";
                                 return (
-                                  <Box key={d.id} sx={{ flex: "1 1 110px", minWidth: 100, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d" }}>
-                                    <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                  <Box key={d.id} onClick={() => setActiveMetricKey(d.id)} sx={{ flex: "1 1 110px", minWidth: 100, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d", cursor: "pointer", "&:hover": { background: dc + "18" } }}>
+                                    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                      <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                      {METRIC_INFO[d.id] && <Typography sx={{ fontSize: 8, color: dc, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>}
+                                    </Box>
                                     <Typography sx={{ fontSize: 14, fontWeight: 700, color: dc, lineHeight: 1.1 }}>{d.value ?? "—"}</Typography>
                                     <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.25, lineHeight: 1.4 }}>{d.detail}</Typography>
                                   </Box>
@@ -13811,23 +15190,65 @@ const Dashboard = () => {
                               })}
                             </Box>
                             {(() => {
+                              const kalshiMtg = kalshiData?.series?.KXMORTGAGERATE?.markets?.length > 0
+                                ? kalshiMedian(kalshiData.series.KXMORTGAGERATE.markets)?.value ?? null : null;
+                              const hpa = _hpaOutlook(met, kalshiMtg);
+                              if (!hpa) return null;
+                              return (
+                                <Box sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.border}` }}>
+                                  <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.75 }}>HPA Outlook · 5-signal composite</Typography>
+                                  <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                                    <Box onClick={() => setActiveMetricKey("hpa_range")} sx={{ flex: "0 0 115px", minWidth: 115, border: `1px solid ${hpa.color}44`, borderRadius: 1, p: 1, background: hpa.color + "18", cursor: "pointer", "&:hover": { background: hpa.color + "28" } }}>
+                                      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                        <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
+                                        <Typography sx={{ fontSize: 8, color: hpa.color, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>
+                                      </Box>
+                                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: hpa.color, lineHeight: 1.1 }}>{hpa.hpaLow >= 0 ? "+" : ""}{hpa.hpaLow}-{hpa.hpaHigh}%</Typography>
+                                      <Typography sx={{ fontSize: 9, color: C.muted }}>avg HPA/yr</Typography>
+                                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: hpa.color, mt: 0.25 }}>{hpa.label}</Typography>
+                                    </Box>
+                                    {hpa.drivers.map((d) => {
+                                      const _poolPct = d.key === "buyer_pool" ? parseInt(d.value) : null;
+                                      const dc = _poolPct != null
+                                        ? (_poolPct > 50 ? "#4ade80" : _poolPct > 40 ? "#86efac" : _poolPct > 30 ? "#fbbf24" : _poolPct > 20 ? "#f97316" : "#f87171")
+                                        : (d.score >= 0.6 ? C.greenLight : d.score >= 0.35 ? "#f0a500" : "#e57373");
+                                      return (
+                                        <Box key={d.key} onClick={() => setActiveMetricKey(d.key)} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${dc}88`, borderRadius: 1, p: 1, background: dc + "0d", cursor: "pointer", "&:hover": { background: dc + "18" } }}>
+                                          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                            <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                            {METRIC_INFO[d.key] && <Typography sx={{ fontSize: 8, color: dc, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>}
+                                          </Box>
+                                          <Typography sx={{ fontSize: 13, fontWeight: 700, color: dc, lineHeight: 1.1 }}>{d.value ?? "—"}</Typography>
+                                          <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.25, lineHeight: 1.4 }}>{d.detail}</Typography>
+                                        </Box>
+                                      );
+                                    })}
+                                  </Box>
+                                </Box>
+                              );
+                            })()}
+                            {renderAffordabilityBanner(met, selCounty.population)}
+                            {(() => {
                               const text = deepDives[`formation:${selCounty.fips}`] || _formationNarrative(selCounty.name, selCounty.state, met, fs, rank, allCounties.length);
                               return text ? <Box sx={{ mb: 1.5 }}>{renderDeepDive(text)}</Box> : null;
                             })()}
                             <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.75 }}>Key Metrics</Typography>
                             <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
                               {[
-                                { label: "Home Value", value: met?.zhvi_latest ? `$${(met.zhvi_latest / 1000).toFixed(0)}k` : "—" },
-                                { label: "Median HHI", value: met?.median_hhi ? `$${(met.median_hhi / 1000).toFixed(0)}k` : "—" },
-                                { label: "Unemployment", value: met?.unemployment_rate != null ? `${met.unemployment_rate.toFixed(1)}%` : "—" },
-                                { label: "Emp Growth", value: met?.emp_growth_pct != null ? `${met.emp_growth_pct >= 0 ? "+" : ""}${met.emp_growth_pct.toFixed(1)}%` : "—" },
-                                { label: "Pop Density", value: met?.pop_density != null ? `${met.pop_density.toFixed(0)}/mi²` : "—" },
-                                { label: "Land Value", value: met?.farmland_value_acre != null ? `$${(met.farmland_value_acre / 1000).toFixed(1)}k/ac` : "—" },
-                                { label: "Permits/1k", value: met?.permit_units_per_1k != null ? `${met.permit_units_per_1k.toFixed(1)}` : "—" },
-                                { label: "FEMA Risk", value: met?.fema_risk_score != null ? `${met.fema_risk_score.toFixed(0)}/100` : "—" },
-                              ].map(({ label, value }) => (
-                                <Box key={label} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${C.border}`, borderRadius: 1, p: 0.75 }}>
-                                  <Typography sx={{ fontSize: 8, color: C.muted, fontWeight: 600 }}>{label}</Typography>
+                                { label: "Home Value", value: met?.zhvi_latest ? `$${(met.zhvi_latest / 1000).toFixed(0)}k` : "—", mk: "home_value" },
+                                { label: "Median HHI", value: met?.median_hhi ? `$${(met.median_hhi / 1000).toFixed(0)}k` : "—", mk: "median_hhi" },
+                                { label: "Unemployment", value: met?.unemployment_rate != null ? `${met.unemployment_rate.toFixed(1)}%` : "—", mk: "unemployment" },
+                                { label: "Emp Growth", value: met?.emp_growth_pct != null ? `${met.emp_growth_pct >= 0 ? "+" : ""}${met.emp_growth_pct.toFixed(1)}%` : "—", mk: "emp_growth_pct" },
+                                { label: "Pop Density", value: met?.pop_density != null ? `${met.pop_density.toFixed(0)}/mi²` : "—", mk: "pop_density" },
+                                { label: "Land Value", value: met?.farmland_value_acre != null ? `$${(met.farmland_value_acre / 1000).toFixed(1)}k/ac` : "—", mk: "land_value" },
+                                { label: "Permits/1k", value: met?.permit_units_per_1k != null ? `${met.permit_units_per_1k.toFixed(1)}` : "—", mk: "permits_1k" },
+                                { label: "FEMA Risk", value: met?.fema_risk_score != null ? `${met.fema_risk_score.toFixed(0)}/100` : "—", mk: "fema_risk" },
+                              ].map(({ label, value, mk }) => (
+                                <Box key={label} onClick={() => mk && setActiveMetricKey(mk)} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${C.border}`, borderRadius: 1, p: 0.75, cursor: "pointer", "&:hover": { background: C.bg, borderColor: C.muted } }}>
+                                  <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                    <Typography sx={{ fontSize: 8, color: C.muted, fontWeight: 600 }}>{label}</Typography>
+                                    <Typography sx={{ fontSize: 7, color: C.muted, opacity: 0.5, lineHeight: 1 }}>ⓘ</Typography>
+                                  </Box>
                                   <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.charcoal }}>{value}</Typography>
                                 </Box>
                               ))}
@@ -13843,7 +15264,7 @@ const Dashboard = () => {
                     if (!groundScoreData) return groundScoreLoading ? (
                       <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, pt: 6 }}>
                         <l-helix size="60" speed="2.5" color={C.navy}></l-helix>
-                        <Typography sx={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Loading Ground Score Intelligence</Typography>
+                        <Typography sx={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Loading Market Intelligence</Typography>
                       </Box>
                     ) : null;
                     const INDUSTRY_OPTS = [
@@ -13894,12 +15315,18 @@ const Dashboard = () => {
                                   {engineeredProfile.landPriority ? "Critical (high weight)" : "Standard (base weight)"}
                                 </button>
                                 <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.75, mb: 0.5, fontWeight: 600 }}>Active Weights</Typography>
-                                {[["Available Workforce","30%"],["Land & Dev Cost", engineeredProfile.landPriority ? "25%" : "15%"],["Infrastructure","20%"],["Growth Momentum","15%"],["AP Absorption","10%"]].map(([dim, wt]) => (
-                                  <Box key={dim} sx={{ display: "flex", justifyContent: "space-between", mb: 0.2 }}>
-                                    <Typography sx={{ fontSize: 8, color: C.muted }}>{dim}</Typography>
-                                    <Typography sx={{ fontSize: 8, fontWeight: 700, color: C.charcoal }}>{wt}</Typography>
-                                  </Box>
-                                ))}
+                                {(() => {
+                                  const bw = _ENG_INDUSTRY_WEIGHTS[engineeredProfile.industry] || _ENG_INDUSTRY_WEIGHTS.manufacturing;
+                                  const lw = engineeredProfile.landPriority ? Math.min(0.30, bw.land + 0.05) : Math.max(0.05, bw.land - 0.05);
+                                  const ww = Math.max(0.05, bw.workforce - (lw - bw.land));
+                                  const pct = (w) => `${Math.round(w * 100)}%`;
+                                  return [["Available Workforce", pct(ww)], ["Land & Dev Cost", pct(lw)], ["Infrastructure", pct(bw.infra)], ["Growth Momentum", pct(bw.momentum)], ["AP Absorption", pct(bw.absorption)]].map(([dim, wt]) => (
+                                    <Box key={dim} sx={{ display: "flex", justifyContent: "space-between", mb: 0.2 }}>
+                                      <Typography sx={{ fontSize: 8, color: C.muted }}>{dim}</Typography>
+                                      <Typography sx={{ fontSize: 8, fontWeight: 700, color: C.charcoal }}>{wt}</Typography>
+                                    </Box>
+                                  ));
+                                })()}
                               </Box>
                             </Box>
                           </CardContent>
@@ -13938,8 +15365,11 @@ const Dashboard = () => {
                                   {es.dims.map(d => {
                                     const dc = d.score >= 0.65 ? C.greenLight : d.score >= 0.38 ? "#f0a500" : "#e57373";
                                     return (
-                                      <Box key={d.id} sx={{ flex: "1 1 110px", minWidth: 100, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d" }}>
-                                        <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                      <Box key={d.id} onClick={() => setActiveMetricKey(d.id)} sx={{ flex: "1 1 110px", minWidth: 100, border: `1px solid ${dc}44`, borderRadius: 1, p: 1, background: dc + "0d", cursor: "pointer", "&:hover": { background: dc + "18" } }}>
+                                        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                          <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                          {METRIC_INFO[d.id] && <Typography sx={{ fontSize: 8, color: dc, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>}
+                                        </Box>
                                         <Typography sx={{ fontSize: 14, fontWeight: 700, color: dc, lineHeight: 1.1 }}>{d.value ?? "—"}</Typography>
                                         <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.25, lineHeight: 1.4 }}>{d.detail}</Typography>
                                       </Box>
@@ -13947,25 +15377,67 @@ const Dashboard = () => {
                                   })}
                                 </Box>
                                 {(() => {
+                                  const kalshiMtg = kalshiData?.series?.KXMORTGAGERATE?.markets?.length > 0
+                                    ? kalshiMedian(kalshiData.series.KXMORTGAGERATE.markets)?.value ?? null : null;
+                                  const hpa = _hpaOutlook(met, kalshiMtg);
+                                  if (!hpa) return null;
+                                  return (
+                                    <Box sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.border}` }}>
+                                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.75 }}>HPA Outlook · 5-signal composite</Typography>
+                                      <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                                        <Box onClick={() => setActiveMetricKey("hpa_range")} sx={{ flex: "0 0 115px", minWidth: 115, border: `1px solid ${hpa.color}44`, borderRadius: 1, p: 1, background: hpa.color + "18", cursor: "pointer", "&:hover": { background: hpa.color + "28" } }}>
+                                          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                            <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>Implied YoY Range</Typography>
+                                            <Typography sx={{ fontSize: 8, color: hpa.color, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>
+                                          </Box>
+                                          <Typography sx={{ fontSize: 16, fontWeight: 700, color: hpa.color, lineHeight: 1.1 }}>{hpa.hpaLow >= 0 ? "+" : ""}{hpa.hpaLow}-{hpa.hpaHigh}%</Typography>
+                                          <Typography sx={{ fontSize: 9, color: C.muted }}>avg HPA/yr</Typography>
+                                          <Typography sx={{ fontSize: 9, fontWeight: 700, color: hpa.color, mt: 0.25 }}>{hpa.label}</Typography>
+                                        </Box>
+                                        {hpa.drivers.map((d) => {
+                                          const _poolPct = d.key === "buyer_pool" ? parseInt(d.value) : null;
+                                          const dc = _poolPct != null
+                                            ? (_poolPct > 50 ? "#4ade80" : _poolPct > 40 ? "#86efac" : _poolPct > 30 ? "#fbbf24" : _poolPct > 20 ? "#f97316" : "#f87171")
+                                            : (d.score >= 0.6 ? C.greenLight : d.score >= 0.35 ? "#f0a500" : "#e57373");
+                                          return (
+                                            <Box key={d.key} onClick={() => setActiveMetricKey(d.key)} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${dc}88`, borderRadius: 1, p: 1, background: dc + "0d", cursor: "pointer", "&:hover": { background: dc + "18" } }}>
+                                              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                                <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.25 }}>{d.label}</Typography>
+                                                {METRIC_INFO[d.key] && <Typography sx={{ fontSize: 8, color: dc, opacity: 0.6, lineHeight: 1 }}>ⓘ</Typography>}
+                                              </Box>
+                                              <Typography sx={{ fontSize: 13, fontWeight: 700, color: dc, lineHeight: 1.1 }}>{d.value ?? "—"}</Typography>
+                                              <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.25, lineHeight: 1.4 }}>{d.detail}</Typography>
+                                            </Box>
+                                          );
+                                        })}
+                                      </Box>
+                                    </Box>
+                                  );
+                                })()}
+                                {renderAffordabilityBanner(met, selCounty.population)}
+                                {(() => {
                                   const text = deepDives[`engineered:${selCounty.fips}`] || _engineeredNarrative(selCounty.name, selCounty.state, met, es, rank, allCounties.length, engineeredProfile);
                                   return text ? <Box sx={{ mb: 1.5 }}>{renderDeepDive(text)}</Box> : null;
                                 })()}
                                 <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.75 }}>Site Intelligence</Typography>
                                 <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
                                   {[
-                                    { label: "Unemployment", value: met?.unemployment_rate != null ? `${met.unemployment_rate.toFixed(1)}%` : "—" },
-                                    { label: "Labor Force", value: met?.lfpr != null ? `${met.lfpr.toFixed(1)}% LFPR` : "—" },
-                                    { label: "Total Jobs", value: met?.total_employment ? `${(met.total_employment / 1000).toFixed(0)}k` : "—" },
-                                    { label: "Land Value", value: met?.farmland_value_acre != null ? `$${(met.farmland_value_acre / 1000).toFixed(1)}k/ac` : "—" },
-                                    { label: "Pop Density", value: met?.pop_density != null ? `${met.pop_density.toFixed(0)}/mi²` : "—" },
-                                    { label: "Broadband", value: met?.broadband_pct != null ? `${met.broadband_pct.toFixed(0)}%` : "—" },
-                                    { label: "Metro Drive", value: met?.drive_min_nearest_metro != null ? `${met.drive_min_nearest_metro.toFixed(0)} min` : "—" },
-                                    { label: "Median Wage", value: met?.oes_median_wage ? `$${(met.oes_median_wage / 1000).toFixed(0)}k` : "—" },
-                                    { label: "Median HHI", value: met?.median_hhi ? `$${(met.median_hhi / 1000).toFixed(0)}k` : "—" },
-                                    { label: "Home Value", value: met?.zhvi_latest ? `$${(met.zhvi_latest / 1000).toFixed(0)}k` : "—" },
-                                  ].map(({ label, value }) => (
-                                    <Box key={label} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${C.border}`, borderRadius: 1, p: 0.75 }}>
-                                      <Typography sx={{ fontSize: 8, color: C.muted, fontWeight: 600 }}>{label}</Typography>
+                                    { label: "Unemployment", value: met?.unemployment_rate != null ? `${met.unemployment_rate.toFixed(1)}%` : "—", mk: "unemployment" },
+                                    { label: "Labor Force", value: met?.lfpr != null ? `${met.lfpr.toFixed(1)}% LFPR` : "—", mk: null },
+                                    { label: "Total Jobs", value: met?.total_employment ? `${(met.total_employment / 1000).toFixed(0)}k` : "—", mk: null },
+                                    { label: "Land Value", value: met?.farmland_value_acre != null ? `$${(met.farmland_value_acre / 1000).toFixed(1)}k/ac` : "—", mk: "land_value" },
+                                    { label: "Pop Density", value: met?.pop_density != null ? `${met.pop_density.toFixed(0)}/mi²` : "—", mk: "pop_density" },
+                                    { label: "Broadband", value: met?.broadband_pct != null ? `${met.broadband_pct.toFixed(0)}%` : "—", mk: null },
+                                    { label: "Metro Drive", value: met?.drive_min_nearest_metro != null ? `${met.drive_min_nearest_metro.toFixed(0)} min` : "—", mk: null },
+                                    { label: "Median Wage", value: met?.oes_median_wage ? `$${(met.oes_median_wage / 1000).toFixed(0)}k` : "—", mk: null },
+                                    { label: "Median HHI", value: met?.median_hhi ? `$${(met.median_hhi / 1000).toFixed(0)}k` : "—", mk: "median_hhi" },
+                                    { label: "Home Value", value: met?.zhvi_latest ? `$${(met.zhvi_latest / 1000).toFixed(0)}k` : "—", mk: "home_value" },
+                                  ].map(({ label, value, mk }) => (
+                                    <Box key={label} onClick={() => mk && setActiveMetricKey(mk)} sx={{ flex: "1 1 90px", minWidth: 85, border: `1px solid ${C.border}`, borderRadius: 1, p: 0.75, cursor: mk ? "pointer" : "default", "&:hover": mk ? { background: C.bg, borderColor: C.muted } : {} }}>
+                                      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                                        <Typography sx={{ fontSize: 8, color: C.muted, fontWeight: 600 }}>{label}</Typography>
+                                        {mk && <Typography sx={{ fontSize: 7, color: C.muted, opacity: 0.5, lineHeight: 1 }}>ⓘ</Typography>}
+                                      </Box>
                                       <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.charcoal }}>{value}</Typography>
                                     </Box>
                                   ))}
@@ -13986,7 +15458,7 @@ const Dashboard = () => {
                       {groundScoreLoading && (
                         <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, pt: 6 }}>
                           <l-helix size="60" speed="2.5" color={C.navy}></l-helix>
-                          <Typography sx={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Loading Ground Score Intelligence</Typography>
+                          <Typography sx={{ fontSize: 9, fontWeight: 600, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase" }}>Loading Market Intelligence</Typography>
                         </Box>
                       )}
 
@@ -14120,6 +15592,7 @@ const Dashboard = () => {
                                     {actDive ? (
                                       <Box sx={{ mt: 2, pt: 1.5, borderTop: `1px solid ${C.border}` }}>
                                         <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 1 }}>Activation Brief</Typography>
+                                        {coordDiveExpanded && renderAffordabilityBanner(act.metrics, act.population)}
                                         {renderDeepDive(coordDiveExpanded ? actDive : divePreview(actDive))}
                                         <button onClick={() => setCoordDiveExpanded(v => !v)} style={{ marginTop: 6, fontSize: 10, color: C.navy, background: "none", border: "none", cursor: "pointer", padding: 0, fontFamily: "'Inter',sans-serif", fontWeight: 600 }}>
                                           {coordDiveExpanded ? "Show less ▲" : "Read more ▼"}
@@ -14154,6 +15627,7 @@ const Dashboard = () => {
                                     {expDive ? (
                                       <Box sx={{ mt: 2, pt: 1.5, borderTop: `1px solid ${C.border}` }}>
                                         <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 1 }}>Expansion Brief</Typography>
+                                        {coordDiveExpanded && renderAffordabilityBanner(exp.metrics, exp.population)}
                                         {renderDeepDive(coordDiveExpanded ? expDive : divePreview(expDive))}
                                         <button onClick={() => setCoordDiveExpanded(v => !v)} style={{ marginTop: 6, fontSize: 10, color: C.navy, background: "none", border: "none", cursor: "pointer", padding: 0, fontFamily: "'Inter',sans-serif", fontWeight: 600 }}>
                                           {coordDiveExpanded ? "Show less ▲" : "Read more ▼"}
@@ -15217,6 +16691,68 @@ const Dashboard = () => {
                               </table>
                             </CardContent>
                           </Card>
+
+                          {/* Property Valuation Methodology */}
+                          <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 2, mt: 2 }}>
+                            <CardContent sx={{ pb: "16px !important" }}>
+                              <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.1em", mb: 0.5 }}>Property Valuation Methodology</Typography>
+                              <Typography sx={{ fontSize: 10, color: C.muted, mb: 2, lineHeight: 1.6 }}>
+                                How the dashboard arrives at a property's estimated current value — in priority order.
+                              </Typography>
+
+                              {/* Priority tiers */}
+                              {[
+                                {
+                                  n: "1",
+                                  label: "Rentcast AVM (Primary)",
+                                  color: "#4ade80",
+                                  tag: "LIVE",
+                                  body: "Rentcast's Automated Valuation Model queries comp-level transaction data for the subject property's ZIP code, applies a hedonic regression across comparable sales (matched on beds, baths, sqft, year built, and property type), and returns a point estimate plus a confidence range. When the AVM confidence interval is narrow (range spread ≤ 20% of midpoint), this estimate is used as-is. Last-sale data is sourced from both the Rentcast property record and the AVM's subject property response, whichever is available.",
+                                  sources: "Source: Rentcast /v1/avm/value + /v1/properties  ·  Updated: weekly",
+                                },
+                                {
+                                  n: "2",
+                                  label: "CS Appreciation Cross-Check (Low-Confidence AVM)",
+                                  color: "#fbbf24",
+                                  tag: "CROSS-CHECK",
+                                  body: "When the AVM confidence interval is wide (range spread > 20%), the model may have sparse comps and can undercount appreciation in high-velocity markets. In this case, the last recorded sale price is compounded forward using the national Case-Shiller U.S. Home Price Index (annual rates). If the CS-adjusted value exceeds the AVM midpoint, it is used instead — catching cases where Rentcast anchors near a stale or below-market last sale. If the CS value is lower, the AVM midpoint is retained.",
+                                  sources: "Sources: Rentcast last sale price/date  ·  S&P Case-Shiller U.S. National HPI",
+                                },
+                                {
+                                  n: "3",
+                                  label: "National Case-Shiller Only (No AVM)",
+                                  color: "#f97316",
+                                  tag: "FALLBACK",
+                                  body: "If the Rentcast AVM is unavailable entirely, last sale price is grown forward using the Case-Shiller U.S. National Home Price Index alone. This is the least accurate method — it applies a single national average to a market that may have significantly outperformed or underperformed. Used only when no AVM data is returned.",
+                                  sources: "Source: S&P Case-Shiller U.S. National HPI (monthly series via FRED)",
+                                },
+                              ].map(({ n, label, color, tag, body, sources }) => (
+                                <Box key={n} sx={{ display: "flex", gap: 1.5, mb: 2, pb: 2, borderBottom: `1px solid ${C.border}`, "&:last-child": { mb: 0, pb: 0, borderBottom: "none" } }}>
+                                  <Box sx={{ width: 22, height: 22, borderRadius: "50%", background: color + "22", border: `1.5px solid ${color}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, mt: 0.25 }}>
+                                    <Typography sx={{ fontSize: 9, fontWeight: 800, color }}>{n}</Typography>
+                                  </Box>
+                                  <Box sx={{ flex: 1 }}>
+                                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
+                                      <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.charcoal }}>{label}</Typography>
+                                      <Box sx={{ px: 0.75, py: 0.25, borderRadius: 0.5, background: color + "22", border: `1px solid ${color}44` }}>
+                                        <Typography sx={{ fontSize: 7, fontWeight: 700, color, letterSpacing: "0.06em" }}>{tag}</Typography>
+                                      </Box>
+                                    </Box>
+                                    <Typography sx={{ fontSize: 10, color: C.sub, lineHeight: 1.65, mb: 0.75 }}>{body}</Typography>
+                                    <Typography sx={{ fontSize: 9, color: C.muted, fontStyle: "italic" }}>{sources}</Typography>
+                                  </Box>
+                                </Box>
+                              ))}
+
+                              {/* Accuracy note */}
+                              <Box sx={{ mt: 1.5, p: 1.5, borderRadius: 1, background: C.navy + "10", border: `1px solid ${C.navy}22` }}>
+                                <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.navy, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.5 }}>Accuracy Note</Typography>
+                                <Typography sx={{ fontSize: 9, color: C.sub, lineHeight: 1.6 }}>
+                                  The AVM median error rate for single-family homes is typically 3–5%. Accuracy narrows with comp density (suburban/urban) and widens in rural, low-transaction, or premium neighborhood-within-neighborhood markets where comparable sales in the immediate area are sparse. In those cases, the AVM confidence range will be wide (&gt;20%) and the CS cross-check is applied automatically. The estimated value drives all downstream mortgage calculations — monthly payment, DTI, and equity projections. No on-site inspection, title search, or licensed appraisal is performed; this estimate is for illustrative purposes only.
+                                </Typography>
+                              </Box>
+                            </CardContent>
+                          </Card>
                         </Box>
                       );
                     })()}
@@ -15936,6 +17472,7 @@ const Dashboard = () => {
           </Typography>
         </Box>
       </Box>
+      <MetricInfoModal metricKey={activeMetricKey} onClose={() => setActiveMetricKey(null)} />
     </Box>
   );
 };

@@ -33,7 +33,8 @@ export default function AuthGate({ children }) {
         restoreIntendedUrl();
         checkUser();
       }
-      if (payload.event === "signInWithRedirect_failure") setState("unauthenticated");
+      if (payload.event === "signInWithRedirect_failure")
+        setState("unauthenticated");
     });
 
     return unsubscribe;
@@ -50,11 +51,18 @@ export default function AuthGate({ children }) {
 
   if (state === "loading") {
     return (
-      <div style={{
-        display: "flex", alignItems: "center", justifyContent: "center",
-        height: "100vh", background: "#0d1b2a",
-        fontFamily: "'Inter', sans-serif", color: "#a0b4c8", fontSize: 14,
-      }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          height: "100vh",
+          background: "#0d1b2a",
+          fontFamily: "'Inter', sans-serif",
+          color: "#a0b4c8",
+          fontSize: 14,
+        }}
+      >
         Loading…
       </div>
     );
@@ -65,23 +73,50 @@ export default function AuthGate({ children }) {
     saveIntendedUrl();
 
     return (
-      <div style={{
-        display: "flex", flexDirection: "column", alignItems: "center",
-        justifyContent: "center", height: "100vh", background: "#0d1b2a",
-        fontFamily: "'Inter', sans-serif", gap: 24,
-      }}>
-        <img src="/ampledge_white.svg" alt="Ampledge" style={{ width: 48, opacity: 0.9 }} />
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          height: "100vh",
+          background: "#0d1b2a",
+          fontFamily: "'Inter', sans-serif",
+          gap: 24,
+        }}
+      >
+        <img
+          src="/ampledge_white.svg"
+          alt="Ampledge"
+          style={{ width: 48, opacity: 0.9 }}
+        />
         <div style={{ textAlign: "center" }}>
-          <div style={{ color: "#ffffff", fontWeight: 800, fontSize: 20, letterSpacing: "0.01em", marginBottom: 6 }}>
+          <div
+            style={{
+              color: "#ffffff",
+              fontWeight: 800,
+              fontSize: 20,
+              letterSpacing: "0.01em",
+              marginBottom: 6,
+            }}
+          >
             American Pledge
           </div>
-          <div style={{ color: "#a0b4c8", fontSize: 13 }}>Investment Performance Report</div>
+          <div style={{ color: "#a0b4c8", fontSize: 13 }}>
+            Housing Market Intelligence
+          </div>
         </div>
         <button
           onClick={() => signInWithRedirect()}
           style={{
-            background: "#c0392b", color: "#fff", border: "none", borderRadius: 6,
-            padding: "10px 28px", fontSize: 14, fontWeight: 700, cursor: "pointer",
+            background: "#c0392b",
+            color: "#fff",
+            border: "none",
+            borderRadius: 6,
+            padding: "10px 28px",
+            fontSize: 14,
+            fontWeight: 700,
+            cursor: "pointer",
             letterSpacing: "0.03em",
           }}
         >
