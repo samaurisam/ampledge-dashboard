@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { generateAndOpenReport } from "./PropertyReport";
+import { generateAndOpenMarketActionPlan } from "./MarketActionPlan";
 import { signOut } from "aws-amplify/auth";
 import { helix } from "ldrs";
 import {
@@ -688,12 +689,65 @@ const METRIC_INFO = {
       { range: "< 40%", label: "Limited AP Lift", color: "#f97316" },
     ],
   },
+  cei: {
+    title: "Cluster Emergence Index",
+    subtitle: "Regional neighbor alignment · contiguous county scoring",
+    what: "The Cluster Emergence Index (CEI) measures how a county positions relative to its contiguous neighbors in the same thesis model. It computes the gap between a county's composite score and its neighbors' average, combined with the density of high-scoring neighbors in the region. CEI adjusts the composite score upward (max +10%) for markets leading strong regional clusters, and downward (up to -5%) for isolated or lagging markets.",
+    why: "Markets don't exist in isolation — a Lead Market surrounded by other strong markets has structural demand tailwinds that reinforce the thesis. Conversely, a high-scoring market in a sea of weak neighbors may lack regional momentum. CEI captures this cluster dynamic and makes it actionable: Early Leaders require urgency, Mature Clusters require basis discipline, and Isolated markets require extra local validation.",
+    tiers: [
+      { range: "Leads neighbors by ≥10 pts, cluster forming (<60% density)", label: "Early Leader", color: "#4ade80" },
+      { range: "Strong regional cluster (≥60% neighbors score well, gap ≥ -5)", label: "Mature Cluster", color: "#2563eb" },
+      { range: "Scores well but neighbors are weak (<30% density, gap ≥ -5)", label: "Structural Isolation", color: "#d97706" },
+      { range: "Neighbors outscore by >10 pts", label: "Regional Laggard", color: "#ef4444" },
+      { range: "Mixed regional context — neither strong tailwind nor headwind", label: "Neutral", color: "#9ca3af" },
+    ],
+    note: "CEI is computed against neighbors scored in the same thesis model. Adjusted composite = base composite × (1 + CEI multiplier). Max multiplier varies by thesis: Expansion/Formation +10%, Engineered +5%, Activation +3%.",
+    thesisImplications: {
+      activation: {
+        "Early Leader": { verdict: "Strong Buy Signal", color: "#4ade80", body: "This distressed market is recovering faster than its neighbors. The catalyst is producing results before the surrounding region catches up — you're positioned ahead of the regional repricing wave. Act with urgency: as neighboring markets recognize the recovery, basis will compress. The window to acquire at distressed pricing while the cluster is still forming is narrow." },
+        "Mature Cluster": { verdict: "Proceed with Basis Discipline", color: "#2563eb", body: "The entire region is in recovery mode — multiple neighboring markets have similar distress-to-recovery profiles. This validates the macro thesis strongly but compresses your entry advantage. Competition for distressed inventory will be higher. The investment case is solid but underwrite conservatively on acquisition price; you're not the only one who sees this region." },
+        "Structural Isolation": { verdict: "Catalyst Validation Required", color: "#d97706", body: "This market is recovering while its neighbors remain distressed. That's unusual — either the catalyst is uniquely local (a specific factory, base, or infrastructure project that doesn't benefit neighbors), or the recovery signal is fragile. Before committing, confirm the catalyst is durable and specifically tied to this county. Don't rely on regional spillover — it won't come." },
+        "Regional Laggard": { verdict: "Proceed with Caution", color: "#ef4444", body: "Neighboring markets are scoring better on the activation model. This market is lagging its region. Either the distress is deeper or the catalyst is weaker than what's working next door. Ask: is there a specific reason to be here rather than a higher-scoring neighbor? If not, the regional context is a headwind." },
+        "Neutral": { verdict: "Local Fundamentals Drive Decision", color: "#9ca3af", body: "Mixed regional context. No strong cluster tailwind or headwind. The Activation case lives on local fundamentals alone — the catalyst, distress depth, and buyer pool metrics are what matters here. Standard diligence applies." },
+      },
+      expansion: {
+        "Early Leader": { verdict: "Highest-Conviction Entry", color: "#4ade80", body: "This market is absorbing the metro spillover wave before its neighbors catch up. You are early — land basis has not yet priced in the regional demand expansion that's already underway. This is the highest-conviction entry window in the expansion thesis: the demand wave is confirmed but the neighbors haven't reacted yet. Speed to site control matters. Once adjacent counties recognize the migration pattern, land prices across the cluster will reprice." },
+        "Mature Cluster": { verdict: "Strong Thesis, Competitive Market", color: "#2563eb", body: "The entire metro fringe is absorbing spillover demand — multiple surrounding counties are scoring well. This confirms the regional thesis but means land acquisition is competitive. Builders, developers, and other investors are already in the area. You're not discovering this market; you're competing in it. Basis discipline and entitlement execution speed are the edge. Avoid overpaying on land in a mature cluster." },
+        "Structural Isolation": { verdict: "Local Demand Driver Needed", color: "#d97706", body: "This market scores well on expansion metrics but its neighbors don't — the regional migration wave hasn't reached this area yet. Either this county has a specific local demand anchor (school district, employer, amenity) that distinguishes it from neighbors, or the expansion thesis is fragile here. Without regional reinforcement, absorption projections are harder to defend. Validate the local demand driver before committing land capital." },
+        "Regional Laggard": { verdict: "Better Opportunities Nearby", color: "#ef4444", body: "Adjacent counties are scoring better on the expansion model. The metro spillover is landing on your neighbors first. This market may benefit eventually, but you're behind the wave rather than ahead of it. Unless there's a specific reason this county will catch up (large entitlement in progress, superior school district, lower land cost), the regional context suggests redirecting capital to a higher-ranked neighbor." },
+        "Neutral": { verdict: "Standard Expansion Diligence", color: "#9ca3af", body: "Mixed regional context — neither a strong cluster tailwind nor headwind. The expansion case is evaluated on local fundamentals: metro drive time, household income support, land basis, and permit velocity. Regional CEI is not a significant factor in this market's evaluation." },
+      },
+      formation: {
+        "Early Leader": { verdict: "First-Mover Window Open", color: "#4ade80", body: "This market is demographically ahead of its neighbors. Population growth and in-migration are compounding here before the surrounding region has caught up. You have a first-mover window on land assembly at agricultural basis before: (1) neighboring counties generate their own development activity, and (2) regional awareness of this corridor drives land prices up. The cluster is forming — this is the ideal formation entry." },
+        "Mature Cluster": { verdict: "Cluster Confirmed, Competition Arriving", color: "#2563eb", body: "The demographic wave is visible across the entire region — multiple contiguous counties are showing strong formation signals. This validates that the growth is structural and not county-specific. However, builders and land buyers in a mature formation cluster are already active. Your land assembly window is narrowing. Move from planning to execution; the agricultural basis window closes as builder interest enters the corridor." },
+        "Structural Isolation": { verdict: "Verify Demographics Independently", color: "#d97706", body: "Strong formation signals in this county without regional confirmation. This could mean: (1) this county has a specific amenity or school district advantage neighbors lack, or (2) the demographic data has noise and the growth isn't as durable as it appears. Verify in-migration trends with multiple data sources. Strong standalone formation markets can succeed, but regional demographic clusters are more durable than isolated pockets." },
+        "Regional Laggard": { verdict: "Wait for Signals to Improve", color: "#ef4444", body: "Neighboring counties are showing stronger formation signals. The demographic momentum that drives the formation thesis is more advanced elsewhere in the region. Unless there's a specific reason this county will outperform its neighbors (unique land availability, specific school district, lower density), the formation case is stronger in adjacent markets." },
+        "Neutral": { verdict: "Local Demographics Are the Story", color: "#9ca3af", body: "Neither a strong regional tailwind nor headwind. Evaluate this market purely on its demographic fundamentals: population growth rate, net in-migration, income levels, school district quality, and land availability. CEI is not a differentiating signal here." },
+      },
+      engineered: {
+        "Early Leader": { verdict: "Regional Validation — Act on Site Control", color: "#4ade80", body: "This market leads its neighbors on the engineered scoring model — labor availability, infrastructure, and land cost are more favorable here than in the surrounding region. For an employer site decision, this is the strongest regional validation signal: the inputs that make employer investment viable are concentrated in this county. Site control and incentive package assembly should move with urgency." },
+        "Mature Cluster": { verdict: "Proven Industrial Region", color: "#2563eb", body: "This county sits within a proven industrial or logistics cluster — multiple neighboring counties are also scoring well on employer-site metrics. This has two implications: (1) the regional infrastructure and labor pool are established and reliable, and (2) competing employers and developers are already active in the area. Use the cluster as validation but negotiate hard on incentives — the county knows it's in a competitive region." },
+        "Structural Isolation": { verdict: "Incentive Leverage is High", color: "#d97706", body: "Strong employer-site metrics but neighbors are weak. This county may have a specific infrastructure advantage (rail access, highway interchange, utility capacity) that neighbors lack. Isolation means less competition from other employers, which increases your incentive negotiating leverage. Validate that the infrastructure advantage is genuine and durable. The workforce commute shed may be the binding constraint in an isolated market." },
+        "Regional Laggard": { verdict: "Revisit Site Selection", color: "#ef4444", body: "Adjacent counties score better on the engineered model — stronger labor pools, better infrastructure, or lower land costs. Unless there's a very specific reason to be in this county (unique parcel, specific incentive package, anchor tenant requirement), the site selection case is stronger in a neighboring market. Present both options to the employer before committing." },
+        "Neutral": { verdict: "Site-Specific Factors Dominate", color: "#9ca3af", body: "No strong regional cluster signal in either direction. The employer site decision comes down to site-specific factors: parcel availability, zoning, utility capacity, proximity to workforce, and incentive package. Standard engineered market diligence applies." },
+      },
+    },
+  },
 };
 
 // ─── Metric Info Modal ────────────────────────────────────────────────────────
-const MetricInfoModal = ({ metricKey, onClose }) => {
+const MetricInfoModal = ({ metricKey, thesis, onClose }) => {
   const info = metricKey ? METRIC_INFO[metricKey] : null;
   if (!info) return null;
+
+  const isCei = metricKey === "cei";
+  const thesisImplications = isCei && thesis && info.thesisImplications?.[thesis]
+    ? info.thesisImplications[thesis]
+    : null;
+
+  // Ordered CEI label display sequence
+  const CEI_LABEL_ORDER = ["Early Leader", "Mature Cluster", "Structural Isolation", "Regional Laggard", "Neutral"];
+
   return (
     <Dialog open={!!metricKey} onClose={onClose} maxWidth="sm" fullWidth
       PaperProps={{ sx: { borderRadius: 2, background: "#0d1b2a", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 24px 48px rgba(0,0,0,0.6)" } }}>
@@ -726,6 +780,33 @@ const MetricInfoModal = ({ metricKey, onClose }) => {
                   <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.45)" }}>{t.range}</Typography>
                 </Box>
               ))}
+            </Box>
+          </Box>
+        )}
+        {thesisImplications && (
+          <Box sx={{ mt: 2, pt: 2, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+            <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.1em", mb: 1.25 }}>
+              What each label means for{" "}
+              <span style={{ color: thesis === "activation" ? "#0a2240" : thesis === "expansion" ? "#27ae60" : thesis === "formation" ? "#1f6da8" : "#d35400" }}>
+                {thesis.charAt(0).toUpperCase() + thesis.slice(1)}
+              </span>{" "}
+              thesis
+            </Typography>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.25 }}>
+              {CEI_LABEL_ORDER.map((label) => {
+                const imp = thesisImplications[label];
+                if (!imp) return null;
+                return (
+                  <Box key={label} sx={{ p: 1.5, borderRadius: 1.5, background: "rgba(255,255,255,0.04)", border: `1px solid ${imp.color}33` }}>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.75 }}>
+                      <Box sx={{ width: 7, height: 7, borderRadius: "50%", background: imp.color, flexShrink: 0 }} />
+                      <Typography sx={{ fontSize: 11, fontWeight: 800, color: imp.color, letterSpacing: "0.01em" }}>{label}</Typography>
+                      <Typography sx={{ fontSize: 10, fontWeight: 700, color: imp.color, ml: "auto", opacity: 0.9 }}>{imp.verdict}</Typography>
+                    </Box>
+                    <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.65)", lineHeight: 1.6 }}>{imp.body}</Typography>
+                  </Box>
+                );
+              })}
             </Box>
           </Box>
         )}
@@ -3241,7 +3322,11 @@ const Dashboard = () => {
   const [deepDives, setDeepDives] = useState(() => { // { "thesis:fips" → markdown text }
     try { return JSON.parse(localStorage.getItem("ampledge_dd_cache") || "{}"); } catch { return {}; }
   });
+  const [tldrs, setTldrs] = useState(() => { // { "thesis:fips" → tldr string }
+    try { return JSON.parse(localStorage.getItem("ampledge_tldr_cache") || "{}"); } catch { return {}; }
+  });
   const [deepDiveLoading, setDeepDiveLoading] = useState(null); // "thesis:fips" key being fetched
+  const [tldrModal, setTldrModal] = useState(null); // { text, title, accentColor } | null
   const [coordSelectedFips, setCoordSelectedFips] = useState(null);
   const [coordSelectedExpFips, setCoordSelectedExpFips] = useState(null); // expansion county of the pair
   const [coordDiveExpanded, setCoordDiveExpanded] = useState(false);
@@ -3340,6 +3425,11 @@ const Dashboard = () => {
             {apPool != null ? `~${Math.round(apPool)}%` : "—"}
           </Typography>
         </Box>
+        <Box sx={{ flex: 1, borderLeft: `1px solid rgba(255,255,255,0.12)`, pl: 2, pr: 4 }}>
+          <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.85)", lineHeight: 1.35, fontStyle: "italic" }}>
+            American Pledge covers 20% of the purchase price — eliminating PMI, lowering the qualifying income bar, and bringing{addlHH > 0 ? ` ~${addlHH.toLocaleString()} more households` : ` ${liftPts > 0 ? liftPts : "more"} pts`} into qualification range. A deeper buyer pool sustains demand and protects long-term home values in this market.
+          </Typography>
+        </Box>
         <Box sx={{ position: "absolute", bottom: 8, right: 10 }}>
           <img src="/ampledge_white.svg" alt="" style={{ height: 18 }} />
         </Box>
@@ -3428,11 +3518,20 @@ const Dashboard = () => {
     });
   }, []);
 
+  const persistTldr = React.useCallback((key, text) => {
+    setTldrs((prev) => {
+      const next = { ...prev, [key]: text };
+      try { localStorage.setItem("ampledge_tldr_cache", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
   // On-demand deep dive request (async pattern: POST → 202 → poll GET until ready)
+  // force=true bypasses cache and triggers regeneration
   const requestDeepDive = React.useCallback(
-    (county, thesis) => {
+    (county, thesis, force = false) => {
       const key = `${thesis}:${county.fips}`;
-      if (deepDives[key] || deepDiveLoading === key) return;
+      if (!force && (deepDives[key] || deepDiveLoading === key)) return;
       setDeepDiveLoading(key);
 
       const poll = (retries = 20) => {
@@ -3443,6 +3542,7 @@ const Dashboard = () => {
             .then((data) => {
               if (data.status === "ready" && data.deep_dive) {
                 persistDeepDive(key, data.deep_dive);
+                if (data.tldr) persistTldr(key, data.tldr);
                 setDeepDiveLoading(null);
               } else {
                 poll(retries - 1);
@@ -3466,6 +3566,8 @@ const Dashboard = () => {
           population: county.population,
           dims: county.dims,
           metrics: county.metrics,
+          cei: county.cei ?? null,
+          ...(force ? { force: true } : {}),
         }),
       })
         .then((r) => r.json())
@@ -3473,6 +3575,7 @@ const Dashboard = () => {
           if (data.deep_dive) {
             // Cache hit — immediate response
             persistDeepDive(key, data.deep_dive);
+            if (data.tldr) persistTldr(key, data.tldr);
             setDeepDiveLoading(null);
           } else if (data.status === "generating") {
             // Async — start polling
@@ -3483,7 +3586,7 @@ const Dashboard = () => {
         })
         .catch(() => setDeepDiveLoading(null));
     },
-    [deepDives, deepDiveLoading, persistDeepDive],
+    [deepDives, deepDiveLoading, persistDeepDive, persistTldr],
   ); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sync URL to active tab
@@ -5050,7 +5153,7 @@ const Dashboard = () => {
             avmValue = avmData?.price          ?? null;
             avmLow   = avmData?.priceRangeLow  ?? null;
             avmHigh  = avmData?.priceRangeHigh ?? null;
-            avmComps = avmData?.comparables?.length ?? null;
+            avmComps = avmData?.comparables    ?? null;
             // AVM subjectProperty is a richer source of last-sale data — use it
             // as a fallback when the /v1/properties call didn't return sale history.
             const subj = avmData?.subjectProperty;
@@ -5442,7 +5545,7 @@ const Dashboard = () => {
                         {!propLoading && propResult?.avmValue && propResult?.avmLow && propResult?.avmHigh && (
                           <Typography sx={{ fontSize: 8, color: "rgba(255,255,255,0.5)", mt: 0.5 }}>
                             Range: ${(propResult.avmLow / 1e6).toFixed(2)}M – ${(propResult.avmHigh / 1e6).toFixed(2)}M
-                            {propResult.avmComps ? ` · ${propResult.avmComps} comps` : ""}
+                            {propResult.avmComps?.length ? ` · ${propResult.avmComps.length} comps` : ""}
                           </Typography>
                         )}
                         {!propLoading && !propResult?.avmValue && propResult?.lastSalePrice && propResult?.lastSaleDate && (() => {
@@ -5492,6 +5595,25 @@ const Dashboard = () => {
                     {propError && (
                       <Typography sx={{ fontSize: 11, color: "#e57373", mt: 1 }}>{propError}</Typography>
                     )}
+
+                    {/* ── SMS Instructions ─────────────────────────────── */}
+                    <Box sx={{ mt: 2.5, pt: 2, borderTop: `1px solid ${C.border}` }}>
+                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, letterSpacing: "0.08em", textTransform: "uppercase", mb: 1 }}>
+                        Get Report via SMS
+                      </Typography>
+                      <Box sx={{ background: C.light, border: `1px solid ${C.border}`, borderRadius: 1.5, p: 1.5 }}>
+                        <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.navy, mb: 0.5 }}>
+                          Text any address to:
+                        </Typography>
+                        <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.navy, letterSpacing: "0.04em", mb: 1 }}>
+                          (843) 606-6112
+                        </Typography>
+                        <Typography sx={{ fontSize: 10, color: C.sub, lineHeight: 1.5 }}>
+                          We'll reply with a PDF borrower report sent directly to your phone via MMS — no app required.
+                        </Typography>
+                      </Box>
+                    </Box>
+
                   </CardContent>
                 </Card>
               </Grid>
@@ -5786,7 +5908,10 @@ const Dashboard = () => {
                                   <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.green, textTransform: "uppercase", letterSpacing: "0.08em", mb: 0.5 }}>Buyer Affordability Lift</Typography>
                                   <Typography sx={{ fontSize: 34, fontWeight: 800, color: C.greenLight, lineHeight: 1 }}>+{lift.toFixed(0)}</Typography>
                                   <Typography sx={{ fontSize: 10, color: C.green, fontWeight: 600, mb: 0.5 }}>pts buyer pool</Typography>
-                                  <Typography sx={{ fontSize: 9, color: C.muted }}>AP contribution: ${Math.round(apContrib).toLocaleString()}</Typography>
+                                  <Typography sx={{ fontSize: 9, color: C.muted, mb: 1 }}>AP contribution: ${Math.round(apContrib).toLocaleString()}</Typography>
+                                  <Typography sx={{ fontSize: 9, color: C.sub, lineHeight: 1.35, borderTop: `1px solid ${C.greenLight}44`, pt: 1 }}>
+                                    By covering 20% of the purchase price, AP eliminates PMI and lowers the income threshold — qualifying {lift != null ? `${lift.toFixed(0)} percentage points` : "significantly"} more households and deepening the future buyer pool for this home.
+                                  </Typography>
                                 </Box>
                               )}
                             </Box>
@@ -6065,11 +6190,19 @@ const Dashboard = () => {
                       formation:   { entry: "Greenfield land assembly", demand: "In-migration · Pop growth", ap: "MPC buyer engine", hold: "7–10 years", entryKey: "thesis_entry_formation", demandKey: "thesis_demand_formation", apKey: "thesis_ap_formation", holdKey: "thesis_hold_formation" },
                       engineered:  { entry: "Pre-announcement land", demand: "Employer workforce", ap: "Workforce housing engine", hold: "10–15 years", entryKey: "thesis_entry_engineered", demandKey: "thesis_demand_engineered", apKey: "thesis_ap_engineered", holdKey: "thesis_hold_engineered" },
                     }[chartPane];
-                    // Resolve which county list backs this tab
-                    const _tabSrc = (chartPane === "opportunity" || chartPane === "formation")
-                      ? groundScoreData?.expansion
-                      : groundScoreData?.activation;
-                    const _selectedCounty = _tabSrc?.find(c => c.fips === neopoliMarket) || _tabSrc?.[0];
+                    // Resolve which county list and selected FIPS back this tab
+                    // formation/engineered are client-side scored — sort by _composite so rank is correct
+                    const _rankedSrc = chartPane === "neopoli"    ? groundScoreData?.activation
+                                     : chartPane === "opportunity" ? groundScoreData?.expansion
+                                     : chartPane === "formation"   ? [...(formationCounties || [])].sort((a, b) => b._composite - a._composite)
+                                     : [...(engineeredCounties || [])].sort((a, b) => b._composite - a._composite);
+                    const _selectedFips = chartPane === "formation"  ? (formationSelectedFips || _rankedSrc?.[0]?.fips)
+                                        : chartPane === "engineered" ? (engineeredSelectedFips || _rankedSrc?.[0]?.fips)
+                                        : neopoliMarket;
+                    const _selectedCounty = _rankedSrc?.find(c => c.fips === _selectedFips) || _rankedSrc?.[0];
+                    const _selectedRank = _rankedSrc
+                      ? (_rankedSrc.findIndex(c => c.fips === _selectedFips) + 1) || null
+                      : null;
                     return (
                     <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
                       <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 2, py: 1.25, borderBottom: `1px solid ${C.border}` }}>
@@ -6103,9 +6236,9 @@ const Dashboard = () => {
                                 You're viewing{" "}
                                 <span style={{ fontWeight: 700, color: C.charcoal }}>{_selectedCounty.name}, {_selectedCounty.state}</span>
                                 {" "}— ranked{" "}
-                                <span style={{ fontWeight: 700, color: accentColor }}>#{_selectedCounty.rank}</span>
+                                <span style={{ fontWeight: 700, color: accentColor }}>#{_selectedRank}</span>
                                 {" "}in {tabLabel}.
-                                {_selectedCounty.rank === 1
+                                {_selectedRank === 1
                                   ? " This is the top-ranked market loaded by default."
                                   : " You selected this market from the map or ranking table."}
                                 {" "}Use the{" "}
@@ -6131,8 +6264,8 @@ const Dashboard = () => {
                               </Typography>
                               {chartPane === "neopoli" && (
                                 <>
-                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
-                                    Target distressed secondary and tertiary markets ahead of catalyst events. Entry cost is low by design — economic dislocation creates acquisition basis. When the catalyst fires (employer anchor, federal infrastructure award, OZ deployment), appreciation accrues to early-positioned capital. American Pledge's 20% down payment program expands the qualified buyer pool in markets where affordability is the primary barrier, accelerating exit.
+                                  <Typography sx={{ fontSize: 14, color: accentColor, lineHeight: 1.25, mb: "20px" }}>
+                                    What distressed markets can be acquired today, before a catalyst event re-prices them, where economic dislocation creates the entry basis to convert a newly-qualified buyer pool into exits — capturing the spread between current distressed pricing and post-catalyst value?
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
@@ -6150,8 +6283,8 @@ const Dashboard = () => {
                               )}
                               {chartPane === "opportunity" && (
                                 <>
-                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
-                                    Target metro-fringe counties with strong household income, land availability, and proximity to major employment centers. These markets are primed for master-planned community development where American Pledge's down payment program is the decisive lever: converting a large pool of qualified-income households into first-time buyers.
+                                  <Typography sx={{ fontSize: 14, color: accentColor, lineHeight: 1.25, mb: "20px" }}>
+                                    What metro-fringe sites can be acquired at near-agricultural pricing today, where household incomes already support ownership but the down payment gap is the only barrier — creating a latent buyer pool that makes a master-planned community pencil before competing supply arrives?
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
@@ -6169,8 +6302,8 @@ const Dashboard = () => {
                               )}
                               {chartPane === "formation" && (
                                 <>
-                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
-                                    Identify greenfield corridors where demographic momentum, low land cost, and development-ready infrastructure converge — before institutional capital arrives. Formation markets are growth corridors at early inflection where a master-planned community with the American Pledge program creates the demand ecosystem from the ground up.
+                                  <Typography sx={{ fontSize: 14, color: accentColor, lineHeight: 1.25, mb: "20px" }}>
+                                    Where is population already arriving, land still at raw pricing, and no large builder yet committed — creating the window to capture in-migration demand and drive absorption velocity before institutional capital prices in the opportunity?
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
@@ -6188,8 +6321,8 @@ const Dashboard = () => {
                               )}
                               {chartPane === "engineered" && (
                                 <>
-                                  <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
-                                    Employer-first site acquisition ahead of public announcement. When an employer anchor is brought to market, it creates a designed demand ecosystem: the employer generates the workforce, American Pledge converts that workforce into buyers, and the adjacent MPC captures the housing demand. This is not market selection — it is market creation.
+                                  <Typography sx={{ fontSize: 14, color: accentColor, lineHeight: 1.25, mb: "20px" }}>
+                                    What sites can be acquired today, ahead of employer announcement, where available workforce + affordable land + infrastructure create the conditions to convert an arriving workforce into buyers at scale — capturing the spread between pre-announcement land cost and post-announcement demand?
                                   </Typography>
                                   <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.7, mb: 0.75 }}>
                                     <span style={{ fontWeight: 700, color: C.charcoal }}>What it uncovers — </span>
@@ -6211,6 +6344,54 @@ const Dashboard = () => {
                     </Card>
                     );
                   })()}
+
+                  {/* ── Employer Profile / Site Optimizer Inputs (engineered tab only) ── */}
+                  {chartPane === "engineered" && (
+                    <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                      <CardContent sx={{ pb: "12px !important" }}>
+                        <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 1 }}>
+                          Employer Profile — Site Optimizer Inputs
+                        </Typography>
+                        <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", alignItems: "flex-start" }}>
+                          <Box sx={{ flex: "1 1 140px", minWidth: 130 }}>
+                            <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.5 }}>Employer Industry</Typography>
+                            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+                              {[{ v: "manufacturing", label: "Manufacturing" }, { v: "logistics", label: "Logistics / Distribution" }, { v: "tech", label: "Technology / R&D" }, { v: "healthcare", label: "Healthcare / Medical" }, { v: "mixed", label: "Mixed Use / Other" }].map(({ v, label }) => (
+                                <button key={v} onClick={() => setEngineeredProfile(p => ({ ...p, industry: v }))} style={{ fontSize: 10, fontWeight: 600, textAlign: "left", padding: "4px 10px", border: `1px solid ${engineeredProfile.industry === v ? C.orange : C.border}`, borderRadius: 4, background: engineeredProfile.industry === v ? C.orange + "18" : "transparent", color: engineeredProfile.industry === v ? C.orange : C.muted, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>{label}</button>
+                              ))}
+                            </Box>
+                          </Box>
+                          <Box sx={{ flex: "1 1 140px", minWidth: 130 }}>
+                            <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.5 }}>Target Wage Level</Typography>
+                            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+                              {[{ v: "low", label: "Entry-level (<$45k)" }, { v: "moderate", label: "Moderate ($45k–$80k)" }, { v: "high", label: "Professional (>$80k)" }].map(({ v, label }) => (
+                                <button key={v} onClick={() => setEngineeredProfile(p => ({ ...p, wageLevel: v }))} style={{ fontSize: 10, fontWeight: 600, textAlign: "left", padding: "4px 10px", border: `1px solid ${engineeredProfile.wageLevel === v ? C.orange : C.border}`, borderRadius: 4, background: engineeredProfile.wageLevel === v ? C.orange + "18" : "transparent", color: engineeredProfile.wageLevel === v ? C.orange : C.muted, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>{label}</button>
+                              ))}
+                            </Box>
+                          </Box>
+                          <Box sx={{ flex: "1 1 140px", minWidth: 130 }}>
+                            <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.5 }}>Land Cost Priority</Typography>
+                            <button onClick={() => setEngineeredProfile(p => ({ ...p, landPriority: !p.landPriority }))} style={{ fontSize: 10, fontWeight: 700, padding: "5px 14px", border: `1px solid ${engineeredProfile.landPriority ? C.orange : C.border}`, borderRadius: 4, background: engineeredProfile.landPriority ? C.orange + "18" : "transparent", color: engineeredProfile.landPriority ? C.orange : C.muted, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>
+                              {engineeredProfile.landPriority ? "Critical (high weight)" : "Standard (base weight)"}
+                            </button>
+                            <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.75, mb: 0.5, fontWeight: 600 }}>Active Weights</Typography>
+                            {(() => {
+                              const bw = _ENG_INDUSTRY_WEIGHTS[engineeredProfile.industry] || _ENG_INDUSTRY_WEIGHTS.manufacturing;
+                              const lw = engineeredProfile.landPriority ? Math.min(0.30, bw.land + 0.05) : Math.max(0.05, bw.land - 0.05);
+                              const ww = Math.max(0.05, bw.workforce - (lw - bw.land));
+                              const pct = (w) => `${Math.round(w * 100)}%`;
+                              return [["Available Workforce", pct(ww)], ["Land & Dev Cost", pct(lw)], ["Infrastructure", pct(bw.infra)], ["Growth Momentum", pct(bw.momentum)], ["AP Absorption", pct(bw.absorption)]].map(([dim, wt]) => (
+                                <Box key={dim} sx={{ display: "flex", justifyContent: "space-between", mb: 0.2 }}>
+                                  <Typography sx={{ fontSize: 8, color: C.muted }}>{dim}</Typography>
+                                  <Typography sx={{ fontSize: 8, fontWeight: 700, color: C.charcoal }}>{wt}</Typography>
+                                </Box>
+                              ));
+                            })()}
+                          </Box>
+                        </Box>
+                      </CardContent>
+                    </Card>
+                  )}
 
                   {chartPane !== "model" && chartPane !== "coordinated" && (
                     <Card
@@ -7818,6 +7999,39 @@ const Dashboard = () => {
                                         <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.navy }}>{Math.round(fs.composite)}</Typography>
                                       </Box>
                                     </Box>
+                                    {county?.cei && (() => {
+                                      const cei = county.cei;
+                                      const ceiColor = cei.label === "Early Leader" ? C.greenLight : cei.label === "Mature Cluster" ? C.blue : cei.label === "Regional Laggard" ? "#ef4444" : C.muted;
+                                      return (
+                                        <Box sx={{ mt: 1.5, pt: 1.5, borderTop: `1px solid ${C.border}` }}>
+                                          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.75 }}>
+                                            <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.navy, textTransform: "uppercase", letterSpacing: "0.07em" }}>Cluster Emergence Index</Typography>
+                                            <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                                              <Box sx={{ width: 6, height: 6, borderRadius: "50%", background: ceiColor }} />
+                                              <Typography sx={{ fontSize: 10, fontWeight: 700, color: ceiColor }}>{cei.label}</Typography>
+                                            </Box>
+                                          </Box>
+                                          <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                                            <Typography sx={{ fontSize: 10, color: C.muted }}>CEI Score</Typography>
+                                            <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.navy }}>{cei.score}</Typography>
+                                          </Box>
+                                          <Box sx={{ height: 5, bgcolor: C.border, borderRadius: 1, mb: 1 }}>
+                                            <Box sx={{ height: "100%", width: `${cei.score}%`, bgcolor: ceiColor, borderRadius: 1 }} />
+                                          </Box>
+                                          <Box sx={{ display: "flex", gap: 2 }}>
+                                            {cei.neighbor_avg != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Neighbor Avg</Typography><Typography sx={{ fontSize: 11, fontWeight: 700, color: C.charcoal }}>{cei.neighbor_avg}</Typography></Box>}
+                                            {cei.gap != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Gap</Typography><Typography sx={{ fontSize: 11, fontWeight: 700, color: cei.gap >= 0 ? C.greenLight : "#ef4444" }}>{cei.gap >= 0 ? "+" : ""}{cei.gap}</Typography></Box>}
+                                            <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Cluster Density</Typography><Typography sx={{ fontSize: 11, fontWeight: 700, color: C.charcoal }}>{cei.density} / {cei.neighbor_count}</Typography></Box>
+                                          </Box>
+                                          {cei.adjusted_composite != null && (
+                                            <Box sx={{ mt: 1, pt: 1, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between" }}>
+                                              <Typography sx={{ fontSize: 10, color: C.muted }}>CEI-Adjusted Score</Typography>
+                                              <Typography sx={{ fontSize: 12, fontWeight: 800, color: C.navy }}>{cei.adjusted_composite.toFixed(1)}</Typography>
+                                            </Box>
+                                          )}
+                                        </Box>
+                                      );
+                                    })()}
                                   </Box>
                                 ) : (
                                   <Box sx={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -8002,6 +8216,39 @@ const Dashboard = () => {
                                         <Typography sx={{ fontSize: 16, fontWeight: 800, color: C.navy }}>{Math.round(es.composite)}</Typography>
                                       </Box>
                                     </Box>
+                                    {county?.cei && (() => {
+                                      const cei = county.cei;
+                                      const ceiColor = cei.label === "Early Leader" ? C.greenLight : cei.label === "Mature Cluster" ? C.blue : cei.label === "Regional Laggard" ? "#ef4444" : C.muted;
+                                      return (
+                                        <Box sx={{ mt: 1.5, pt: 1.5, borderTop: `1px solid ${C.border}` }}>
+                                          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.75 }}>
+                                            <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.navy, textTransform: "uppercase", letterSpacing: "0.07em" }}>Cluster Emergence Index</Typography>
+                                            <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                                              <Box sx={{ width: 6, height: 6, borderRadius: "50%", background: ceiColor }} />
+                                              <Typography sx={{ fontSize: 10, fontWeight: 700, color: ceiColor }}>{cei.label}</Typography>
+                                            </Box>
+                                          </Box>
+                                          <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                                            <Typography sx={{ fontSize: 10, color: C.muted }}>CEI Score</Typography>
+                                            <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.navy }}>{cei.score}</Typography>
+                                          </Box>
+                                          <Box sx={{ height: 5, bgcolor: C.border, borderRadius: 1, mb: 1 }}>
+                                            <Box sx={{ height: "100%", width: `${cei.score}%`, bgcolor: ceiColor, borderRadius: 1 }} />
+                                          </Box>
+                                          <Box sx={{ display: "flex", gap: 2 }}>
+                                            {cei.neighbor_avg != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Neighbor Avg</Typography><Typography sx={{ fontSize: 11, fontWeight: 700, color: C.charcoal }}>{cei.neighbor_avg}</Typography></Box>}
+                                            {cei.gap != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Gap</Typography><Typography sx={{ fontSize: 11, fontWeight: 700, color: cei.gap >= 0 ? C.greenLight : "#ef4444" }}>{cei.gap >= 0 ? "+" : ""}{cei.gap}</Typography></Box>}
+                                            <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Cluster Density</Typography><Typography sx={{ fontSize: 11, fontWeight: 700, color: C.charcoal }}>{cei.density} / {cei.neighbor_count}</Typography></Box>
+                                          </Box>
+                                          {cei.adjusted_composite != null && (
+                                            <Box sx={{ mt: 1, pt: 1, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between" }}>
+                                              <Typography sx={{ fontSize: 10, color: C.muted }}>CEI-Adjusted Score</Typography>
+                                              <Typography sx={{ fontSize: 12, fontWeight: 800, color: C.navy }}>{cei.adjusted_composite.toFixed(1)}</Typography>
+                                            </Box>
+                                          )}
+                                        </Box>
+                                      );
+                                    })()}
                                   </Box>
                                 ) : (
                                   <Box sx={{ height: 200, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -9894,7 +10141,7 @@ const Dashboard = () => {
                                   ],
                                   [
                                     "Composite",
-                                    "The composite score is a weighted average of all dimension scores: Σ(dim_score × weight) ÷ Σ(weights). Weights are thesis-specific and calibrated to investment strategy — see dimension tables below.",
+                                    "The composite score is a weighted average of all dimension scores: Σ(dim_score × weight) ÷ Σ(weights). Weights are thesis-specific and calibrated to investment strategy — see dimension tables below. A Cluster Emergence Index (CEI) multiplier is then applied to adjust the composite based on regional neighbor alignment.",
                                   ],
                                   [
                                     "Tiers",
@@ -9941,6 +10188,102 @@ const Dashboard = () => {
                           </Card>
                           <DimTable dims={ACT_DIMS_FULL} thesis="Activation" />
                           <DimTable dims={EXP_DIMS_FULL} thesis="Expansion" />
+
+                          {/* ── Cluster Emergence Index ── */}
+                          <Card elevation={0} sx={{ border: `1px solid ${C.navy}`, borderRadius: 1, overflow: "hidden" }}>
+                            <Box sx={{ background: C.navy, px: 2, py: 1.25 }}>
+                              <Typography sx={{ fontSize: 11, fontWeight: 800, color: C.white, textTransform: "uppercase", letterSpacing: "0.09em" }}>
+                                Cluster Emergence Index (CEI)
+                              </Typography>
+                              <Typography sx={{ fontSize: 10, color: "rgba(255,255,255,0.6)", mt: 0.25 }}>
+                                Regional neighbor alignment multiplier applied after composite scoring
+                              </Typography>
+                            </Box>
+                            <CardContent sx={{ pb: "16px !important" }}>
+                              {/* What it is */}
+                              <Typography sx={{ fontSize: 11, color: C.charcoal, lineHeight: 1.65, mb: 2 }}>
+                                CEI measures whether a high-scoring county is a regional leader ahead of a forming cluster, an isolated outlier, or a laggard in an already-mature cluster. It does not change a county's fundamental dimension scores — it adjusts conviction in those scores based on what neighboring counties are doing. The signal is applied as a small confidence multiplier: <strong>Adjusted Score = Composite × (1 + CEI multiplier)</strong>, where the multiplier ranges from −0.05 to +0.10.
+                              </Typography>
+
+                              {/* Three inputs */}
+                              <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.08em", mb: 1 }}>
+                                Index Inputs
+                              </Typography>
+                              <Box sx={{ display: "flex", flexDirection: "column", gap: 1, mb: 2.5 }}>
+                                {[
+                                  ["Neighbor Score Gap", "Average composite score of all contiguous counties subtracted from the target county score. A large positive gap means the target is ahead of its region — early signal. A negative gap means the target lags its neighbors — late or saturated cluster."],
+                                  ["Neighbor Score Trend", "Direction of change in neighboring county scores. Neighbors rising toward the target indicate a cluster forming around it — the strongest timing signal. Flat or declining neighbors suggest structural isolation with no regional lift."],
+                                  ["Cluster Density", "Count of contiguous counties clearing a minimum score threshold (≥ 50th percentile). Low density = isolated market. High density = mature cluster. The most valuable position is moderate density with rising trend — the cluster is forming but not yet priced in."],
+                                ].map(([name, desc]) => (
+                                  <Box key={name} sx={{ display: "flex", gap: 1.5, alignItems: "flex-start" }}>
+                                    <Box sx={{ width: 6, height: 6, borderRadius: "50%", background: C.navy, mt: "5px", flexShrink: 0 }} />
+                                    <Box>
+                                      <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.charcoal, mb: 0.25 }}>{name}</Typography>
+                                      <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.6 }}>{desc}</Typography>
+                                    </Box>
+                                  </Box>
+                                ))}
+                              </Box>
+
+                              {/* Thesis weights */}
+                              <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.08em", mb: 1 }}>
+                                Thesis-Specific CEI Weight
+                              </Typography>
+                              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                                <thead>
+                                  <tr style={{ borderBottom: `2px solid ${C.navy}` }}>
+                                    {["Thesis", "CEI Weight", "Rationale"].map(h => (
+                                      <th key={h} style={{ padding: "6px 10px", textAlign: "left", fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.07em" }}>{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {[
+                                    ["Expansion", "High (×0.10 max)", "MPC absorption depends on regional household spillover. An isolated county cannot sustain master-planned community scale. Cluster emergence is near-prerequisite."],
+                                    ["Formation", "High (×0.10 max)", "Organic demographic waves are regional by nature. A lone formation signal is more likely a local anomaly (university, government anchor) than a structural household demand wave."],
+                                    ["Engineered", "Medium (×0.05 max)", "Catalyst is employer-specific and local — regional alignment validates but does not drive the thesis. Isolation is acceptable if the employer event is strong enough."],
+                                    ["Activation", "Low (×0.03 max)", "Distressed-basis investing is contrarian by design. Isolation is often a feature, not a flaw — it explains why the market is overlooked and the basis is low. CEI is a minor confidence signal only."],
+                                  ].map(([thesis, weight, rationale], i) => (
+                                    <tr key={thesis} style={{ borderBottom: `1px solid ${C.border}`, background: i % 2 === 0 ? "transparent" : "#f8f9fb" }}>
+                                      <td style={{ padding: "8px 10px", fontWeight: 700, color: C.charcoal, whiteSpace: "nowrap", verticalAlign: "top" }}>{thesis}</td>
+                                      <td style={{ padding: "8px 10px", whiteSpace: "nowrap", verticalAlign: "top" }}>
+                                        <Box sx={{ display: "inline-flex", alignItems: "center", gap: 0.5 }}>
+                                          <Box sx={{ width: weight.includes("0.10") ? 40 : weight.includes("0.05") ? 20 : 12, height: 6, background: C.navy, borderRadius: 2 }} />
+                                          <span style={{ fontSize: 11, fontWeight: 700, color: C.navy }}>{weight}</span>
+                                        </Box>
+                                      </td>
+                                      <td style={{ padding: "8px 10px", verticalAlign: "top" }}>
+                                        <Typography sx={{ fontSize: 11, color: C.charcoal, lineHeight: 1.6 }}>{rationale}</Typography>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+
+                              {/* Interpretation guide */}
+                              <Box sx={{ mt: 2.5, pt: 2, borderTop: `1px solid ${C.border}` }}>
+                                <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.08em", mb: 1 }}>
+                                  Reading the Signal
+                                </Typography>
+                                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.5 }}>
+                                  {[
+                                    { label: "Early Leader", color: C.greenLight, desc: "Target scores well, neighbors are mid-tier but rising. Cluster forming — optimal entry window." },
+                                    { label: "Mature Cluster", color: C.blue, desc: "Target and neighbors all score high. Thesis validated but entry basis likely elevated. Capital already present." },
+                                    { label: "Structural Isolation", color: C.orange, desc: "Target scores well, neighbors flat or declining. Requires strong local catalyst. No regional lift." },
+                                    { label: "Regional Laggard", color: "#ef4444", desc: "Neighbors outscore the target. Thesis may be late — surrounding markets absorbed the opportunity first." },
+                                  ].map(({ label, color, desc }) => (
+                                    <Box key={label} sx={{ flex: "1 1 200px", minWidth: 0, display: "flex", gap: 1, alignItems: "flex-start" }}>
+                                      <Box sx={{ width: 8, height: 8, borderRadius: "50%", background: color, mt: "3px", flexShrink: 0 }} />
+                                      <Box>
+                                        <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.charcoal }}>{label}</Typography>
+                                        <Typography sx={{ fontSize: 11, color: C.muted, lineHeight: 1.55 }}>{desc}</Typography>
+                                      </Box>
+                                    </Box>
+                                  ))}
+                                </Box>
+                              </Box>
+                            </CardContent>
+                          </Card>
                         </>
                       );
                     })()}
@@ -11610,34 +11953,21 @@ const Dashboard = () => {
                                   >
                                     {tierMeta.label}
                                   </span>
-                                  {!deepDives[`activation:${m.fips}`] && (
-                                    <button
-                                      onClick={() =>
-                                        requestDeepDive(m, "activation")
-                                      }
-                                      disabled={
-                                        deepDiveLoading ===
-                                        `activation:${m.fips}`
-                                      }
-                                      style={{
-                                        fontSize: 10,
-                                        fontWeight: 700,
-                                        color: C.white,
-                                        background: "rgba(255,255,255,0.15)",
-                                        border:
-                                          "1px solid rgba(255,255,255,0.4)",
-                                        borderRadius: 4,
-                                        padding: "3px 10px",
-                                        cursor: "pointer",
-                                        whiteSpace: "nowrap",
-                                      }}
-                                    >
-                                      {deepDiveLoading ===
-                                      `activation:${m.fips}`
-                                        ? "Generating…"
-                                        : "Deep Dive"}
+                                  {!deepDives[`activation:${m.fips}`] ? (
+                                    <button onClick={() => requestDeepDive(m, "activation")} disabled={deepDiveLoading === `activation:${m.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                      {deepDiveLoading === `activation:${m.fips}` ? "Generating…" : "Deep Dive"}
                                     </button>
-                                  )}
+                                  ) : (<>
+                                    {tldrs[`activation:${m.fips}`] && (
+                                      <button onClick={() => setTldrModal({ text: tldrs[`activation:${m.fips}`], title: `${m.name}, ${m.state}`, accentColor: C.navy, cei: m.cei, thesis: "activation" })} style={{ fontSize: 10, fontWeight: 700, color: C.navy, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>TLDR</button>
+                                    )}
+                                    <button onClick={() => generateAndOpenMarketActionPlan({ county: m, thesis: "activation", allCounties: groundScoreData.activation, deepDiveText: deepDives[`activation:${m.fips}`] || null, tldrText: tldrs[`activation:${m.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.navy, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                      ⬇ Action Plan
+                                    </button>
+                                    <button onClick={() => requestDeepDive(m, "activation", true)} disabled={deepDiveLoading === `activation:${m.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                      {deepDiveLoading === `activation:${m.fips}` ? "Regenerating…" : "↻ Regenerate"}
+                                    </button>
+                                  </>)}
                                 </Box>
                               </Box>
                               <CardContent sx={{ pb: "12px !important" }}>
@@ -11686,20 +12016,50 @@ const Dashboard = () => {
                                     </Box>
                                   );
                                 })()}
+                                {(() => {
+                                  const cei = m.cei;
+                                  if (!cei) return null;
+                                  const ceiColor = cei.label === "Early Leader" ? C.greenLight : cei.label === "Mature Cluster" ? C.blue : cei.label === "Regional Laggard" ? "#ef4444" : C.muted;
+                                  return (
+                                    <Box sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.border}` }}>
+                                      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+                                        <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Cluster Emergence Index</Typography>
+                                        <Box onClick={() => setActiveMetricKey("cei")} sx={{ display: "flex", alignItems: "center", gap: 0.75, px: 1.25, py: 0.5, borderRadius: 1, background: ceiColor + "18", border: `1px solid ${ceiColor}44`, cursor: "pointer", "&:hover": { background: ceiColor + "28" } }}>
+                                          <Box sx={{ width: 7, height: 7, borderRadius: "50%", background: ceiColor }} />
+                                          <Typography sx={{ fontSize: 10, fontWeight: 700, color: ceiColor }}>{cei.label}</Typography>
+                                        </Box>
+                                      </Box>
+                                      <Box sx={{ mb: 1 }}>
+                                        <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                                          <Typography sx={{ fontSize: 9, color: C.muted }}>CEI Score</Typography>
+                                          <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.navy }}>{cei.score} / 100</Typography>
+                                        </Box>
+                                        <Box sx={{ height: 5, bgcolor: C.border, borderRadius: 1 }}>
+                                          <Box sx={{ height: "100%", width: `${cei.score}%`, bgcolor: ceiColor, borderRadius: 1 }} />
+                                        </Box>
+                                      </Box>
+                                      <Box sx={{ display: "flex", gap: 2.5, flexWrap: "wrap" }}>
+                                        {cei.neighbor_avg != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Neighbor Avg</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.charcoal }}>{cei.neighbor_avg}</Typography></Box>}
+                                        {cei.gap != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Lead Gap</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: cei.gap >= 0 ? C.greenLight : "#ef4444" }}>{cei.gap >= 0 ? "+" : ""}{cei.gap}</Typography></Box>}
+                                        <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Cluster Density</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.charcoal }}>{cei.density}<span style={{ fontSize: 10, fontWeight: 400, color: C.muted }}> / {cei.neighbor_count}</span></Typography></Box>
+                                        {cei.adjusted_composite != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Adj. Score</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.navy }}>{cei.adjusted_composite.toFixed(1)}</Typography></Box>}
+                                      </Box>
+                                    </Box>
+                                  );
+                                })()}
                                 {renderAffordabilityBanner(m.metrics, m.population)}
+                                {tldrs[`activation:${m.fips}`] && (
+                                  <Box sx={{ mb: 1.5, p: 1.5, background: C.navy + "08", border: `1px solid ${C.navy}22`, borderLeft: `3px solid ${C.navy}`, borderRadius: 1 }}>
+                                    <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.navy, textTransform: "uppercase", letterSpacing: "0.1em", mb: 0.5 }}>TLDR</Typography>
+                                    <Typography sx={{ fontSize: 12, color: C.charcoal, lineHeight: 1.65 }}>{tldrs[`activation:${m.fips}`]}</Typography>
+                                  </Box>
+                                )}
                                 {deepDives[`activation:${m.fips}`] ? (
                                   <Box sx={{ mb: 1.5 }}>
                                     {renderDeepDive(deepDives[`activation:${m.fips}`])}
                                   </Box>
                                 ) : (
-                                  <Typography
-                                    sx={{
-                                      fontSize: 12,
-                                      color: C.charcoal,
-                                      lineHeight: 1.7,
-                                      mb: 1.5,
-                                    }}
-                                  >
+                                  <Typography sx={{ fontSize: 12, color: C.charcoal, lineHeight: 1.7, mb: 1.5 }}>
                                     {m.summary}
                                   </Typography>
                                 )}
@@ -12032,8 +12392,11 @@ const Dashboard = () => {
                                               <Typography sx={{ fontSize: 10, color: C.green, fontWeight: 600, mb: 1 }}>pts buyer pool</Typography>
                                               {unlockedHH > 0 && <>
                                                 <Typography sx={{ fontSize: 22, fontWeight: 800, color: C.charcoal, lineHeight: 1 }}>~{fmtHH(unlockedHH)}</Typography>
-                                                <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.25 }}>additional qualifying HH</Typography>
+                                                <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.25, mb: 1 }}>additional qualifying HH</Typography>
                                               </>}
+                                              <Typography sx={{ fontSize: 9, color: C.sub, lineHeight: 1.35, borderTop: `1px solid ${C.greenLight}44`, pt: 1 }}>
+                                                By covering 20% of the purchase price, AP eliminates PMI and lowers the income threshold — qualifying {lift != null ? `${lift.toFixed(0)} percentage points` : "significantly"} more households and deepening the future buyer pool for this home.
+                                              </Typography>
                                             </Box>
                                           </Box>
                                           {/* Buyer pool bars */}
@@ -13459,33 +13822,21 @@ const Dashboard = () => {
                                   >
                                     {tierMeta.label}
                                   </span>
-                                  {!deepDives[`expansion:${m.fips}`] && (
-                                    <button
-                                      onClick={() =>
-                                        requestDeepDive(m, "expansion")
-                                      }
-                                      disabled={
-                                        deepDiveLoading ===
-                                        `expansion:${m.fips}`
-                                      }
-                                      style={{
-                                        fontSize: 10,
-                                        fontWeight: 700,
-                                        color: C.white,
-                                        background: "rgba(255,255,255,0.15)",
-                                        border:
-                                          "1px solid rgba(255,255,255,0.4)",
-                                        borderRadius: 4,
-                                        padding: "3px 10px",
-                                        cursor: "pointer",
-                                        whiteSpace: "nowrap",
-                                      }}
-                                    >
-                                      {deepDiveLoading === `expansion:${m.fips}`
-                                        ? "Generating…"
-                                        : "Deep Dive"}
+                                  {!deepDives[`expansion:${m.fips}`] ? (
+                                    <button onClick={() => requestDeepDive(m, "expansion")} disabled={deepDiveLoading === `expansion:${m.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                      {deepDiveLoading === `expansion:${m.fips}` ? "Generating…" : "Deep Dive"}
                                     </button>
-                                  )}
+                                  ) : (<>
+                                    {tldrs[`expansion:${m.fips}`] && (
+                                      <button onClick={() => setTldrModal({ text: tldrs[`expansion:${m.fips}`], title: `${m.name}, ${m.state}`, accentColor: C.greenLight, cei: m.cei, thesis: "expansion" })} style={{ fontSize: 10, fontWeight: 700, color: C.greenLight, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>TLDR</button>
+                                    )}
+                                    <button onClick={() => generateAndOpenMarketActionPlan({ county: m, thesis: "expansion", allCounties: groundScoreData.expansion, deepDiveText: deepDives[`expansion:${m.fips}`] || null, tldrText: tldrs[`expansion:${m.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.greenLight, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                      ⬇ Action Plan
+                                    </button>
+                                    <button onClick={() => requestDeepDive(m, "expansion", true)} disabled={deepDiveLoading === `expansion:${m.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                      {deepDiveLoading === `expansion:${m.fips}` ? "Regenerating…" : "↻ Regenerate"}
+                                    </button>
+                                  </>)}
                                 </Box>
                               </Box>
                               <CardContent sx={{ pb: "12px !important" }}>
@@ -13534,20 +13885,50 @@ const Dashboard = () => {
                                     </Box>
                                   );
                                 })()}
+                                {(() => {
+                                  const cei = m.cei;
+                                  if (!cei) return null;
+                                  const ceiColor = cei.label === "Early Leader" ? C.greenLight : cei.label === "Mature Cluster" ? C.blue : cei.label === "Regional Laggard" ? "#ef4444" : C.muted;
+                                  return (
+                                    <Box sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.border}` }}>
+                                      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+                                        <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Cluster Emergence Index</Typography>
+                                        <Box onClick={() => setActiveMetricKey("cei")} sx={{ display: "flex", alignItems: "center", gap: 0.75, px: 1.25, py: 0.5, borderRadius: 1, background: ceiColor + "18", border: `1px solid ${ceiColor}44`, cursor: "pointer", "&:hover": { background: ceiColor + "28" } }}>
+                                          <Box sx={{ width: 7, height: 7, borderRadius: "50%", background: ceiColor }} />
+                                          <Typography sx={{ fontSize: 10, fontWeight: 700, color: ceiColor }}>{cei.label}</Typography>
+                                        </Box>
+                                      </Box>
+                                      <Box sx={{ mb: 1 }}>
+                                        <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                                          <Typography sx={{ fontSize: 9, color: C.muted }}>CEI Score</Typography>
+                                          <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.navy }}>{cei.score} / 100</Typography>
+                                        </Box>
+                                        <Box sx={{ height: 5, bgcolor: C.border, borderRadius: 1 }}>
+                                          <Box sx={{ height: "100%", width: `${cei.score}%`, bgcolor: ceiColor, borderRadius: 1 }} />
+                                        </Box>
+                                      </Box>
+                                      <Box sx={{ display: "flex", gap: 2.5, flexWrap: "wrap" }}>
+                                        {cei.neighbor_avg != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Neighbor Avg</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.charcoal }}>{cei.neighbor_avg}</Typography></Box>}
+                                        {cei.gap != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Lead Gap</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: cei.gap >= 0 ? C.greenLight : "#ef4444" }}>{cei.gap >= 0 ? "+" : ""}{cei.gap}</Typography></Box>}
+                                        <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Cluster Density</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.charcoal }}>{cei.density}<span style={{ fontSize: 10, fontWeight: 400, color: C.muted }}> / {cei.neighbor_count}</span></Typography></Box>
+                                        {cei.adjusted_composite != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Adj. Score</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.navy }}>{cei.adjusted_composite.toFixed(1)}</Typography></Box>}
+                                      </Box>
+                                    </Box>
+                                  );
+                                })()}
                                 {renderAffordabilityBanner(m.metrics, m.population)}
+                                {tldrs[`expansion:${m.fips}`] && (
+                                  <Box sx={{ mb: 1.5, p: 1.5, background: C.greenLight + "08", border: `1px solid ${C.greenLight}22`, borderLeft: `3px solid ${C.greenLight}`, borderRadius: 1 }}>
+                                    <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.greenLight, textTransform: "uppercase", letterSpacing: "0.1em", mb: 0.5 }}>TLDR</Typography>
+                                    <Typography sx={{ fontSize: 12, color: C.charcoal, lineHeight: 1.65 }}>{tldrs[`expansion:${m.fips}`]}</Typography>
+                                  </Box>
+                                )}
                                 {deepDives[`expansion:${m.fips}`] ? (
                                   <Box sx={{ mb: 1.5 }}>
                                     {renderDeepDive(deepDives[`expansion:${m.fips}`])}
                                   </Box>
                                 ) : (
-                                  <Typography
-                                    sx={{
-                                      fontSize: 12,
-                                      color: C.charcoal,
-                                      lineHeight: 1.7,
-                                      mb: 1.5,
-                                    }}
-                                  >
+                                  <Typography sx={{ fontSize: 12, color: C.charcoal, lineHeight: 1.7, mb: 1.5 }}>
                                     {m.summary}
                                   </Typography>
                                 )}
@@ -13880,8 +14261,11 @@ const Dashboard = () => {
                                               <Typography sx={{ fontSize: 10, color: C.green, fontWeight: 600, mb: 1 }}>pts buyer pool</Typography>
                                               {unlockedHH > 0 && <>
                                                 <Typography sx={{ fontSize: 22, fontWeight: 800, color: C.charcoal, lineHeight: 1 }}>~{fmtHH(unlockedHH)}</Typography>
-                                                <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.25 }}>additional qualifying HH</Typography>
+                                                <Typography sx={{ fontSize: 10, color: C.muted, mt: 0.25, mb: 1 }}>additional qualifying HH</Typography>
                                               </>}
+                                              <Typography sx={{ fontSize: 9, color: C.sub, lineHeight: 1.35, borderTop: `1px solid ${C.greenLight}44`, pt: 1 }}>
+                                                By covering 20% of the purchase price, AP eliminates PMI and lowers the income threshold — qualifying {lift != null ? `${lift.toFixed(0)} percentage points` : "significantly"} more households and deepening the future buyer pool for this home.
+                                              </Typography>
                                             </Box>
                                           </Box>
                                           {/* Buyer pool bars */}
@@ -15162,15 +15546,21 @@ const Dashboard = () => {
                             </Box>
                             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                               <span style={{ fontSize: 10, fontWeight: 700, color: C.blue, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px" }}>{fs.tier}</span>
-                              {!deepDives[`formation:${selCounty.fips}`] && (
-                                <button
-                                  onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: fs.composite, rank, tier: fs.tier, population: selCounty.population, dims: Object.fromEntries(fs.dims.map(d => [d.id, d.score * 100])), metrics: met }, "formation")}
-                                  disabled={deepDiveLoading === `formation:${selCounty.fips}`}
-                                  style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap", fontFamily: "'Inter',sans-serif" }}
-                                >
+                              {!deepDives[`formation:${selCounty.fips}`] ? (
+                                <button onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: fs.composite, rank, tier: fs.tier, population: selCounty.population, dims: Object.fromEntries(fs.dims.map(d => [d.id, d.score * 100])), metrics: met }, "formation")} disabled={deepDiveLoading === `formation:${selCounty.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
                                   {deepDiveLoading === `formation:${selCounty.fips}` ? "Generating…" : "Deep Dive"}
                                 </button>
-                              )}
+                              ) : (<>
+                                {tldrs[`formation:${selCounty.fips}`] && (
+                                  <button onClick={() => setTldrModal({ text: tldrs[`formation:${selCounty.fips}`], title: `${selCounty.name}, ${selCounty.state}`, accentColor: C.blue, cei: selCounty.cei, thesis: "formation" })} style={{ fontSize: 10, fontWeight: 700, color: C.blue, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>TLDR</button>
+                                )}
+                                <button onClick={() => generateAndOpenMarketActionPlan({ county: { ...selCounty, composite: fs.composite, tier: fs.tier, dims: fs.dims }, thesis: "formation", allCounties: groundScoreData.formation, deepDiveText: deepDives[`formation:${selCounty.fips}`] || null, tldrText: tldrs[`formation:${selCounty.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.blue, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                  ⬇ Action Plan
+                                </button>
+                                <button onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: fs.composite, rank, tier: fs.tier, population: selCounty.population, dims: Object.fromEntries(fs.dims.map(d => [d.id, d.score * 100])), metrics: met }, "formation", true)} disabled={deepDiveLoading === `formation:${selCounty.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                  {deepDiveLoading === `formation:${selCounty.fips}` ? "Regenerating…" : "↻ Regenerate"}
+                                </button>
+                              </>)}
                             </Box>
                           </Box>
                           <CardContent sx={{ pb: "12px !important" }}>
@@ -15227,7 +15617,44 @@ const Dashboard = () => {
                                 </Box>
                               );
                             })()}
+                            {(() => {
+                              const cei = selCounty.cei;
+                              if (!cei) return null;
+                              const ceiColor = cei.label === "Early Leader" ? C.greenLight : cei.label === "Mature Cluster" ? C.blue : cei.label === "Regional Laggard" ? "#ef4444" : C.muted;
+                              return (
+                                <Box sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.border}` }}>
+                                  <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+                                    <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Cluster Emergence Index</Typography>
+                                    <Box onClick={() => setActiveMetricKey("cei")} sx={{ display: "flex", alignItems: "center", gap: 0.75, px: 1.25, py: 0.5, borderRadius: 1, background: ceiColor + "18", border: `1px solid ${ceiColor}44`, cursor: "pointer", "&:hover": { background: ceiColor + "28" } }}>
+                                      <Box sx={{ width: 7, height: 7, borderRadius: "50%", background: ceiColor }} />
+                                      <Typography sx={{ fontSize: 10, fontWeight: 700, color: ceiColor }}>{cei.label}</Typography>
+                                    </Box>
+                                  </Box>
+                                  <Box sx={{ mb: 1 }}>
+                                    <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                                      <Typography sx={{ fontSize: 9, color: C.muted }}>CEI Score</Typography>
+                                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.navy }}>{cei.score} / 100</Typography>
+                                    </Box>
+                                    <Box sx={{ height: 5, bgcolor: C.border, borderRadius: 1 }}>
+                                      <Box sx={{ height: "100%", width: `${cei.score}%`, bgcolor: ceiColor, borderRadius: 1 }} />
+                                    </Box>
+                                  </Box>
+                                  <Box sx={{ display: "flex", gap: 2.5, flexWrap: "wrap" }}>
+                                    {cei.neighbor_avg != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Neighbor Avg</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.charcoal }}>{cei.neighbor_avg}</Typography></Box>}
+                                    {cei.gap != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Gap</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: cei.gap >= 0 ? C.greenLight : "#ef4444" }}>{cei.gap >= 0 ? "+" : ""}{cei.gap}</Typography></Box>}
+                                    <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Cluster Density</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.charcoal }}>{cei.density}<span style={{ fontSize: 10, fontWeight: 400, color: C.muted }}> / {cei.neighbor_count}</span></Typography></Box>
+                                    {cei.adjusted_composite != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Adj. Score</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.navy }}>{cei.adjusted_composite.toFixed(1)}</Typography></Box>}
+                                  </Box>
+                                </Box>
+                              );
+                            })()}
                             {renderAffordabilityBanner(met, selCounty.population)}
+                            {tldrs[`formation:${selCounty.fips}`] && (
+                              <Box sx={{ mb: 1.5, p: 1.5, background: C.blue + "08", border: `1px solid ${C.blue}22`, borderLeft: `3px solid ${C.blue}`, borderRadius: 1 }}>
+                                <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.blue, textTransform: "uppercase", letterSpacing: "0.1em", mb: 0.5 }}>TLDR</Typography>
+                                <Typography sx={{ fontSize: 12, color: C.charcoal, lineHeight: 1.65 }}>{tldrs[`formation:${selCounty.fips}`]}</Typography>
+                              </Box>
+                            )}
                             {(() => {
                               const text = deepDives[`formation:${selCounty.fips}`] || _formationNarrative(selCounty.name, selCounty.state, met, fs, rank, allCounties.length);
                               return text ? <Box sx={{ mb: 1.5 }}>{renderDeepDive(text)}</Box> : null;
@@ -15286,51 +15713,6 @@ const Dashboard = () => {
                     const selCounty = allCounties.find(c => c.fips === selFips) || allCounties[0];
                     return (
                       <Box sx={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
-                        {/* Employer Profile Inputs */}
-                        <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
-                          <CardContent sx={{ pb: "12px !important" }}>
-                            <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em", mb: 1 }}>
-                              Employer Profile — Site Optimizer Inputs
-                            </Typography>
-                            <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", alignItems: "flex-start" }}>
-                              <Box sx={{ flex: "1 1 140px", minWidth: 130 }}>
-                                <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.5 }}>Employer Industry</Typography>
-                                <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
-                                  {INDUSTRY_OPTS.map(({ v, label }) => (
-                                    <button key={v} onClick={() => setEngineeredProfile(p => ({ ...p, industry: v }))} style={{ fontSize: 10, fontWeight: 600, textAlign: "left", padding: "4px 10px", border: `1px solid ${engineeredProfile.industry === v ? C.orange : C.border}`, borderRadius: 4, background: engineeredProfile.industry === v ? C.orange + "18" : "transparent", color: engineeredProfile.industry === v ? C.orange : C.muted, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>{label}</button>
-                                  ))}
-                                </Box>
-                              </Box>
-                              <Box sx={{ flex: "1 1 140px", minWidth: 130 }}>
-                                <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.5 }}>Target Wage Level</Typography>
-                                <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
-                                  {WAGE_OPTS.map(({ v, label }) => (
-                                    <button key={v} onClick={() => setEngineeredProfile(p => ({ ...p, wageLevel: v }))} style={{ fontSize: 10, fontWeight: 600, textAlign: "left", padding: "4px 10px", border: `1px solid ${engineeredProfile.wageLevel === v ? C.orange : C.border}`, borderRadius: 4, background: engineeredProfile.wageLevel === v ? C.orange + "18" : "transparent", color: engineeredProfile.wageLevel === v ? C.orange : C.muted, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>{label}</button>
-                                  ))}
-                                </Box>
-                              </Box>
-                              <Box sx={{ flex: "1 1 140px", minWidth: 130 }}>
-                                <Typography sx={{ fontSize: 9, color: C.muted, fontWeight: 600, mb: 0.5 }}>Land Cost Priority</Typography>
-                                <button onClick={() => setEngineeredProfile(p => ({ ...p, landPriority: !p.landPriority }))} style={{ fontSize: 10, fontWeight: 700, padding: "5px 14px", border: `1px solid ${engineeredProfile.landPriority ? C.orange : C.border}`, borderRadius: 4, background: engineeredProfile.landPriority ? C.orange + "18" : "transparent", color: engineeredProfile.landPriority ? C.orange : C.muted, cursor: "pointer", fontFamily: "'Inter',sans-serif" }}>
-                                  {engineeredProfile.landPriority ? "Critical (high weight)" : "Standard (base weight)"}
-                                </button>
-                                <Typography sx={{ fontSize: 8, color: C.muted, mt: 0.75, mb: 0.5, fontWeight: 600 }}>Active Weights</Typography>
-                                {(() => {
-                                  const bw = _ENG_INDUSTRY_WEIGHTS[engineeredProfile.industry] || _ENG_INDUSTRY_WEIGHTS.manufacturing;
-                                  const lw = engineeredProfile.landPriority ? Math.min(0.30, bw.land + 0.05) : Math.max(0.05, bw.land - 0.05);
-                                  const ww = Math.max(0.05, bw.workforce - (lw - bw.land));
-                                  const pct = (w) => `${Math.round(w * 100)}%`;
-                                  return [["Available Workforce", pct(ww)], ["Land & Dev Cost", pct(lw)], ["Infrastructure", pct(bw.infra)], ["Growth Momentum", pct(bw.momentum)], ["AP Absorption", pct(bw.absorption)]].map(([dim, wt]) => (
-                                    <Box key={dim} sx={{ display: "flex", justifyContent: "space-between", mb: 0.2 }}>
-                                      <Typography sx={{ fontSize: 8, color: C.muted }}>{dim}</Typography>
-                                      <Typography sx={{ fontSize: 8, fontWeight: 700, color: C.charcoal }}>{wt}</Typography>
-                                    </Box>
-                                  ));
-                                })()}
-                              </Box>
-                            </Box>
-                          </CardContent>
-                        </Card>
                         {/* County Detail */}
                         {selCounty && (() => {
                           const es = selCounty.engineeredScore;
@@ -15349,15 +15731,21 @@ const Dashboard = () => {
                                 </Box>
                                 <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                                   <span style={{ fontSize: 10, fontWeight: 700, color: C.orange, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px" }}>{es.tier}</span>
-                                  {!deepDives[`engineered:${selCounty.fips}`] && (
-                                    <button
-                                      onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: es.composite, rank, tier: es.tier, population: selCounty.population, dims: Object.fromEntries(es.dims.map(d => [d.id, d.score * 100])), metrics: met }, "engineered")}
-                                      disabled={deepDiveLoading === `engineered:${selCounty.fips}`}
-                                      style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap", fontFamily: "'Inter',sans-serif" }}
-                                    >
+                                  {!deepDives[`engineered:${selCounty.fips}`] ? (
+                                    <button onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: es.composite, rank, tier: es.tier, population: selCounty.population, dims: Object.fromEntries(es.dims.map(d => [d.id, d.score * 100])), metrics: met }, "engineered")} disabled={deepDiveLoading === `engineered:${selCounty.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
                                       {deepDiveLoading === `engineered:${selCounty.fips}` ? "Generating…" : "Deep Dive"}
                                     </button>
-                                  )}
+                                  ) : (<>
+                                    {tldrs[`engineered:${selCounty.fips}`] && (
+                                      <button onClick={() => setTldrModal({ text: tldrs[`engineered:${selCounty.fips}`], title: `${selCounty.name}, ${selCounty.state}`, accentColor: C.orange, cei: selCounty.cei, thesis: "engineered" })} style={{ fontSize: 10, fontWeight: 700, color: C.orange, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>TLDR</button>
+                                    )}
+                                    <button onClick={() => generateAndOpenMarketActionPlan({ county: { ...selCounty, composite: es.composite, tier: es.tier, dims: es.dims }, thesis: "engineered", allCounties: groundScoreData.activation, deepDiveText: deepDives[`engineered:${selCounty.fips}`] || null, tldrText: tldrs[`engineered:${selCounty.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.orange, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                      ⬇ Action Plan
+                                    </button>
+                                    <button onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: es.composite, rank, tier: es.tier, population: selCounty.population, dims: Object.fromEntries(es.dims.map(d => [d.id, d.score * 100])), metrics: met }, "engineered", true)} disabled={deepDiveLoading === `engineered:${selCounty.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                      {deepDiveLoading === `engineered:${selCounty.fips}` ? "Regenerating…" : "↻ Regenerate"}
+                                    </button>
+                                  </>)}
                                 </Box>
                               </Box>
                               <CardContent sx={{ pb: "12px !important" }}>
@@ -15414,7 +15802,44 @@ const Dashboard = () => {
                                     </Box>
                                   );
                                 })()}
+                                {(() => {
+                                  const cei = selCounty.cei;
+                                  if (!cei) return null;
+                                  const ceiColor = cei.label === "Early Leader" ? C.greenLight : cei.label === "Mature Cluster" ? C.blue : cei.label === "Regional Laggard" ? "#ef4444" : C.muted;
+                                  return (
+                                    <Box sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.border}` }}>
+                                      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+                                        <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.07em" }}>Cluster Emergence Index</Typography>
+                                        <Box onClick={() => setActiveMetricKey("cei")} sx={{ display: "flex", alignItems: "center", gap: 0.75, px: 1.25, py: 0.5, borderRadius: 1, background: ceiColor + "18", border: `1px solid ${ceiColor}44`, cursor: "pointer", "&:hover": { background: ceiColor + "28" } }}>
+                                          <Box sx={{ width: 7, height: 7, borderRadius: "50%", background: ceiColor }} />
+                                          <Typography sx={{ fontSize: 10, fontWeight: 700, color: ceiColor }}>{cei.label}</Typography>
+                                        </Box>
+                                      </Box>
+                                      <Box sx={{ mb: 1 }}>
+                                        <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                                          <Typography sx={{ fontSize: 9, color: C.muted }}>CEI Score</Typography>
+                                          <Typography sx={{ fontSize: 9, fontWeight: 700, color: C.navy }}>{cei.score} / 100</Typography>
+                                        </Box>
+                                        <Box sx={{ height: 5, bgcolor: C.border, borderRadius: 1 }}>
+                                          <Box sx={{ height: "100%", width: `${cei.score}%`, bgcolor: ceiColor, borderRadius: 1 }} />
+                                        </Box>
+                                      </Box>
+                                      <Box sx={{ display: "flex", gap: 2.5, flexWrap: "wrap" }}>
+                                        {cei.neighbor_avg != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Neighbor Avg</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.charcoal }}>{cei.neighbor_avg}</Typography></Box>}
+                                        {cei.gap != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Gap</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: cei.gap >= 0 ? C.greenLight : "#ef4444" }}>{cei.gap >= 0 ? "+" : ""}{cei.gap}</Typography></Box>}
+                                        <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Cluster Density</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.charcoal }}>{cei.density}<span style={{ fontSize: 10, fontWeight: 400, color: C.muted }}> / {cei.neighbor_count}</span></Typography></Box>
+                                        {cei.adjusted_composite != null && <Box><Typography sx={{ fontSize: 9, color: C.muted }}>Adj. Score</Typography><Typography sx={{ fontSize: 14, fontWeight: 800, color: C.navy }}>{cei.adjusted_composite.toFixed(1)}</Typography></Box>}
+                                      </Box>
+                                    </Box>
+                                  );
+                                })()}
                                 {renderAffordabilityBanner(met, selCounty.population)}
+                                {tldrs[`engineered:${selCounty.fips}`] && (
+                                  <Box sx={{ mb: 1.5, p: 1.5, background: C.orange + "08", border: `1px solid ${C.orange}22`, borderLeft: `3px solid ${C.orange}`, borderRadius: 1 }}>
+                                    <Typography sx={{ fontSize: 9, fontWeight: 800, color: C.orange, textTransform: "uppercase", letterSpacing: "0.1em", mb: 0.5 }}>TLDR</Typography>
+                                    <Typography sx={{ fontSize: 12, color: C.charcoal, lineHeight: 1.65 }}>{tldrs[`engineered:${selCounty.fips}`]}</Typography>
+                                  </Box>
+                                )}
                                 {(() => {
                                   const text = deepDives[`engineered:${selCounty.fips}`] || _engineeredNarrative(selCounty.name, selCounty.state, met, es, rank, allCounties.length, engineeredProfile);
                                   return text ? <Box sx={{ mb: 1.5 }}>{renderDeepDive(text)}</Box> : null;
@@ -17472,7 +17897,58 @@ const Dashboard = () => {
           </Typography>
         </Box>
       </Box>
-      <MetricInfoModal metricKey={activeMetricKey} onClose={() => setActiveMetricKey(null)} />
+      <MetricInfoModal
+        metricKey={activeMetricKey}
+        thesis={chartPane === "neopoli" ? "activation" : chartPane === "opportunity" ? "expansion" : chartPane === "formation" ? "formation" : chartPane === "engineered" ? "engineered" : null}
+        onClose={() => setActiveMetricKey(null)}
+      />
+
+      {/* TLDR Modal */}
+      {tldrModal && (
+        <Dialog open onClose={() => setTldrModal(null)} maxWidth="sm" fullWidth
+          PaperProps={{ sx: { borderRadius: 2, background: "#0d1b2a", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 24px 48px rgba(0,0,0,0.6)" } }}>
+          <Box sx={{ px: 3, pt: 2.5, pb: 1, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+            <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 2 }}>
+              <Box>
+                <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.1em", mb: 0.25 }}>TLDR</Typography>
+                <Typography sx={{ fontSize: 15, fontWeight: 800, color: "#fff", letterSpacing: "-0.01em" }}>{tldrModal.title}</Typography>
+              </Box>
+              <Box component="button" onClick={() => setTldrModal(null)} sx={{ background: "transparent", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.4)", fontSize: 18, lineHeight: 1, p: 0, mt: 0.25, "&:hover": { color: "#fff" } }}>✕</Box>
+            </Box>
+          </Box>
+          <DialogContent sx={{ px: 3, py: 2 }}>
+            <Box sx={{ mb: 1.5, pt: 0.5 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1.25 }}>
+                <Box sx={{ width: 10, height: 10, borderRadius: "50%", background: tldrModal.accentColor, flexShrink: 0 }} />
+                <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Market Summary</Typography>
+              </Box>
+              <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.8)", lineHeight: 1.7 }}>{tldrModal.text}</Typography>
+            </Box>
+            {/* CEI tier explanation */}
+            {tldrModal.cei && tldrModal.thesis && (() => {
+              const ceiImpl = METRIC_INFO.cei?.thesisImplications?.[tldrModal.thesis]?.[tldrModal.cei.label];
+              const ceiColorMap = { "Early Leader": "#4ade80", "Mature Cluster": "#2196F3", "Structural Isolation": "#d97706", "Regional Laggard": "#ef4444", "Neutral": "#9ca3af" };
+              const ceiColor = ceiColorMap[tldrModal.cei.label] || "#9ca3af";
+              if (!ceiImpl) return null;
+              return (
+                <Box sx={{ borderTop: "1px solid rgba(255,255,255,0.08)", pt: 1.5, mt: 0.5 }}>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
+                    <Box sx={{ width: 10, height: 10, borderRadius: "50%", background: ceiColor, flexShrink: 0 }} />
+                    <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Cluster Emergence Index</Typography>
+                  </Box>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mb: 1 }}>
+                    <Box sx={{ px: 1.25, py: 0.4, borderRadius: 1, background: ceiColor + "22", border: `1px solid ${ceiColor}55` }}>
+                      <Typography sx={{ fontSize: 10, fontWeight: 700, color: ceiColor, letterSpacing: "0.04em" }}>{tldrModal.cei.label}</Typography>
+                    </Box>
+                    <Typography sx={{ fontSize: 10, fontWeight: 700, color: ceiColor }}>{ceiImpl.verdict}</Typography>
+                  </Box>
+                  <Typography sx={{ fontSize: 12, color: "rgba(255,255,255,0.65)", lineHeight: 1.65 }}>{ceiImpl.body}</Typography>
+                </Box>
+              );
+            })()}
+          </DialogContent>
+        </Dialog>
+      )}
     </Box>
   );
 };
