@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { generateAndOpenReport } from "./PropertyReport";
-import { generateAndOpenMarketActionPlan } from "./MarketActionPlan";
+import { generateAndOpenMarketActionPlan, fetchLandListings } from "./MarketActionPlan";
 import { signOut } from "aws-amplify/auth";
 import { helix } from "ldrs";
 import {
@@ -3370,6 +3370,15 @@ const Dashboard = () => {
   // Engineered Markets
   const [engineeredSelectedFips, setEngineeredSelectedFips] = useState(null);
   const [engineeredPage, setEngineeredPage] = useState(0);
+  const [engLandListings, setEngLandListings] = useState([]);
+  const [engLandLoading, setEngLandLoading] = useState(false);
+  const [engLandFips, setEngLandFips] = useState(null);
+  const [engLandPage, setEngLandPage] = useState(0);
+  const ENG_LAND_PAGE_SIZE = 10;
+  const [formLandListings, setFormLandListings] = useState([]);
+  const [formLandLoading, setFormLandLoading] = useState(false);
+  const [formLandFips, setFormLandFips] = useState(null);
+  const [formLandPage, setFormLandPage] = useState(0);
   const [engineeredProfile, setEngineeredProfile] = useState({
     industry: "manufacturing",   // manufacturing | logistics | tech | healthcare | mixed
     workforceSize: 500,          // target headcount
@@ -3892,6 +3901,42 @@ const Dashboard = () => {
       .sort((a, b) => b.composite - a.composite);
     const idx = sorted.findIndex(c => c.fips === engineeredSelectedFips);
     if (idx >= 0) setEngineeredPage(Math.floor(idx / GS_PAGE_SIZE));
+  }, [engineeredSelectedFips]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch land listings when formation county selection changes
+  React.useEffect(() => {
+    if (!formationSelectedFips) return;
+    const centroid = countyCentroidRef.current[formationSelectedFips];
+    if (!centroid) return;
+    if (formLandFips === formationSelectedFips) return;
+    const lat = centroid[1];
+    const lon = centroid[0];
+    setFormLandLoading(true);
+    setFormLandListings([]);
+    setFormLandFips(formationSelectedFips);
+    setFormLandPage(0);
+    fetchLandListings(lat, lon, "formation", null)
+      .then((listings) => setFormLandListings(listings || []))
+      .catch(() => setFormLandListings([]))
+      .finally(() => setFormLandLoading(false));
+  }, [formationSelectedFips]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch land listings when engineered county selection changes
+  React.useEffect(() => {
+    if (!engineeredSelectedFips) return;
+    const centroid = countyCentroidRef.current[engineeredSelectedFips];
+    if (!centroid) return;
+    if (engLandFips === engineeredSelectedFips) return; // already loaded
+    const lat = centroid[1];
+    const lon = centroid[0];
+    setEngLandLoading(true);
+    setEngLandListings([]);
+    setEngLandFips(engineeredSelectedFips);
+    setEngLandPage(0);
+    fetchLandListings(lat, lon, "engineered", null)
+      .then((listings) => setEngLandListings(listings || []))
+      .catch(() => setEngLandListings([]))
+      .finally(() => setEngLandLoading(false));
   }, [engineeredSelectedFips]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reset coordinated sim deltas + brief expansion when selected county changes
@@ -11961,7 +12006,7 @@ const Dashboard = () => {
                                     {tldrs[`activation:${m.fips}`] && (
                                       <button onClick={() => setTldrModal({ text: tldrs[`activation:${m.fips}`], title: `${m.name}, ${m.state}`, accentColor: C.navy, cei: m.cei, thesis: "activation" })} style={{ fontSize: 10, fontWeight: 700, color: C.navy, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>TLDR</button>
                                     )}
-                                    <button onClick={() => generateAndOpenMarketActionPlan({ county: m, thesis: "activation", allCounties: groundScoreData.activation, deepDiveText: deepDives[`activation:${m.fips}`] || null, tldrText: tldrs[`activation:${m.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.navy, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                    <button onClick={() => generateAndOpenMarketActionPlan({ county: m, thesis: "activation", allCounties: groundScoreData.activation, neighborPool: [...(groundScoreData.activation||[]),...(groundScoreData.expansion||[]),...(groundScoreData.formation||[]),...(groundScoreData.engineered||[])], deepDiveText: deepDives[`activation:${m.fips}`] || null, tldrText: tldrs[`activation:${m.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.navy, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
                                       ⬇ Action Plan
                                     </button>
                                     <button onClick={() => requestDeepDive(m, "activation", true)} disabled={deepDiveLoading === `activation:${m.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
@@ -13041,7 +13086,8 @@ const Dashboard = () => {
                             const below = vals.filter((v) =>
                               lowerBetter ? v > val : v < val,
                             ).length;
-                            return Math.round((below / vals.length) * 100);
+                            const equal = vals.filter((v) => v === val).length;
+                            return Math.round(((below + 0.5 * equal) / vals.length) * 100);
                           };
                           const sig = (pct) => {
                             if (pct == null)
@@ -13830,7 +13876,7 @@ const Dashboard = () => {
                                     {tldrs[`expansion:${m.fips}`] && (
                                       <button onClick={() => setTldrModal({ text: tldrs[`expansion:${m.fips}`], title: `${m.name}, ${m.state}`, accentColor: C.greenLight, cei: m.cei, thesis: "expansion" })} style={{ fontSize: 10, fontWeight: 700, color: C.greenLight, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>TLDR</button>
                                     )}
-                                    <button onClick={() => generateAndOpenMarketActionPlan({ county: m, thesis: "expansion", allCounties: groundScoreData.expansion, deepDiveText: deepDives[`expansion:${m.fips}`] || null, tldrText: tldrs[`expansion:${m.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.greenLight, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                    <button onClick={() => generateAndOpenMarketActionPlan({ county: m, thesis: "expansion", allCounties: groundScoreData.expansion, neighborPool: [...(groundScoreData.activation||[]),...(groundScoreData.expansion||[]),...(groundScoreData.formation||[]),...(groundScoreData.engineered||[])], deepDiveText: deepDives[`expansion:${m.fips}`] || null, tldrText: tldrs[`expansion:${m.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.greenLight, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
                                       ⬇ Action Plan
                                     </button>
                                     <button onClick={() => requestDeepDive(m, "expansion", true)} disabled={deepDiveLoading === `expansion:${m.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
@@ -14926,7 +14972,8 @@ const Dashboard = () => {
                             const below = vals.filter((v) =>
                               lowerBetter ? v > val : v < val,
                             ).length;
-                            return Math.round((below / vals.length) * 100);
+                            const equal = vals.filter((v) => v === val).length;
+                            return Math.round(((below + 0.5 * equal) / vals.length) * 100);
                           };
                           const sig = (pct) => {
                             if (pct == null)
@@ -15554,7 +15601,7 @@ const Dashboard = () => {
                                 {tldrs[`formation:${selCounty.fips}`] && (
                                   <button onClick={() => setTldrModal({ text: tldrs[`formation:${selCounty.fips}`], title: `${selCounty.name}, ${selCounty.state}`, accentColor: C.blue, cei: selCounty.cei, thesis: "formation" })} style={{ fontSize: 10, fontWeight: 700, color: C.blue, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>TLDR</button>
                                 )}
-                                <button onClick={() => generateAndOpenMarketActionPlan({ county: { ...selCounty, composite: fs.composite, tier: fs.tier, dims: fs.dims }, thesis: "formation", allCounties: groundScoreData.formation, deepDiveText: deepDives[`formation:${selCounty.fips}`] || null, tldrText: tldrs[`formation:${selCounty.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.blue, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                <button onClick={() => generateAndOpenMarketActionPlan({ county: { ...selCounty, composite: fs.composite, tier: fs.tier, dims: fs.dims, rank }, thesis: "formation", allCounties: groundScoreData.formation, neighborPool: [...(groundScoreData.activation||[]),...(groundScoreData.expansion||[]),...(groundScoreData.formation||[]),...(groundScoreData.engineered||[])], deepDiveText: deepDives[`formation:${selCounty.fips}`] || null, tldrText: tldrs[`formation:${selCounty.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.blue, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
                                   ⬇ Action Plan
                                 </button>
                                 <button onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: fs.composite, rank, tier: fs.tier, population: selCounty.population, dims: Object.fromEntries(fs.dims.map(d => [d.id, d.score * 100])), metrics: met }, "formation", true)} disabled={deepDiveLoading === `formation:${selCounty.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
@@ -15682,6 +15729,107 @@ const Dashboard = () => {
                             </Box>
                           </CardContent>
                         </Card>
+
+                        {/* ── Formation Land Opportunities Card ── */}
+                        {(() => {
+                          const validPpa = formLandListings.filter(p => p.pricePerAc > 0).map(p => p.pricePerAc).sort((a, b) => a - b);
+                          const medPpa = validPpa.length > 0 ? validPpa[Math.floor(validPpa.length / 2)] : null;
+                          const validDom = formLandListings.filter(p => p.dom != null).map(p => p.dom);
+                          const avgDom = validDom.length > 0 ? Math.round(validDom.reduce((a, b) => a + b, 0) / validDom.length) : null;
+                          const totalPages = Math.ceil(formLandListings.length / ENG_LAND_PAGE_SIZE);
+                          const page = Math.min(formLandPage, Math.max(0, totalPages - 1));
+                          const pageSlice = formLandListings.slice(page * ENG_LAND_PAGE_SIZE, (page + 1) * ENG_LAND_PAGE_SIZE);
+                          return (
+                            <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                              <CardContent sx={{ pb: "12px !important" }}>
+                                <SectionHeader
+                                  title="Land Opportunities"
+                                  sub={formLandListings.length > 0 ? `${formLandListings.length} active listings · 25+ acres · 40-mile radius · sorted by acreage · Rentcast MLS` : "25+ acres · 40-mile radius · Rentcast MLS"}
+                                />
+                                {formLandLoading && (
+                                  <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, py: 2 }}>
+                                    <l-helix size="18" speed="2.5" color={C.navy}></l-helix>
+                                    <Typography sx={{ fontSize: 12, color: C.muted }}>Fetching active listings…</Typography>
+                                  </Box>
+                                )}
+                                {!formLandLoading && formLandListings.length === 0 && formLandFips === selFips && (
+                                  <Typography sx={{ fontSize: 12, color: C.muted, py: 2, textAlign: "center" }}>No active listings found within 40 miles.</Typography>
+                                )}
+                                {!formLandLoading && formLandListings.length > 0 && (
+                                  <>
+                                    <Box sx={{ overflowX: "auto" }}>
+                                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                        <thead>
+                                          <tr>
+                                            {["#", "Address", "Acres", "Price", "$/Acre", "vs. Median", "DOM", "Listed By"].map(h => (
+                                              <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                                            ))}
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {pageSlice.map((p, i) => {
+                                            const ppaDelta = medPpa && p.pricePerAc > 0 ? Math.round(((p.pricePerAc - medPpa) / medPpa) * 100) : null;
+                                            const longListed = avgDom != null && p.dom != null && p.dom > avgDom * 1.5;
+                                            const deltaColor = ppaDelta == null ? C.muted : ppaDelta < 0 ? C.green : ppaDelta >= 10 ? C.orange : C.muted;
+                                            const phone = p.agentPhone?.replace(/\D/g, "");
+                                            const fmtPhone = phone?.length === 10 ? `(${phone.slice(0,3)}) ${phone.slice(3,6)}-${phone.slice(6)}` : p.agentPhone;
+                                            return (
+                                              <tr key={i} style={{ background: i % 2 === 0 ? "transparent" : C.bg }}>
+                                                <td style={{ padding: "7px 10px", fontSize: 11, fontWeight: 700, color: C.muted }}>{page * ENG_LAND_PAGE_SIZE + i + 1}</td>
+                                                <td style={{ padding: "7px 10px" }}>
+                                                  <a href={p.listingUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, fontWeight: 700, color: C.navy, textDecoration: "none" }}
+                                                    onMouseOver={e => e.target.style.textDecoration = "underline"}
+                                                    onMouseOut={e => e.target.style.textDecoration = "none"}>
+                                                    {p.street}
+                                                  </a>
+                                                  <div style={{ fontSize: 10, color: C.muted, marginTop: 1 }}>{p.cityStateZip}{p.propertyType && p.propertyType.toLowerCase() !== "land" ? ` · ${p.propertyType}` : ""}</div>
+                                                </td>
+                                                <td style={{ padding: "7px 10px", fontSize: 13, fontWeight: 800, color: C.charcoal }}>{p.acres.toLocaleString()}</td>
+                                                <td style={{ padding: "7px 10px", fontSize: 12, fontWeight: 700, color: C.charcoal, whiteSpace: "nowrap" }}>
+                                                  ${p.price >= 1000000 ? (p.price / 1000000).toFixed(2) + "M" : p.price.toLocaleString()}
+                                                </td>
+                                                <td style={{ padding: "7px 10px", fontSize: 11, color: C.muted, whiteSpace: "nowrap" }}>${p.pricePerAc.toLocaleString()}</td>
+                                                <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                                  {ppaDelta != null ? (
+                                                    <span style={{ fontSize: 10, fontWeight: 700, color: deltaColor, background: deltaColor + "1a", border: `1px solid ${deltaColor}55`, borderRadius: 4, padding: "2px 7px" }}>
+                                                      {ppaDelta > 0 ? "+" : ""}{ppaDelta}%
+                                                    </span>
+                                                  ) : <span style={{ fontSize: 10, color: C.muted }}>—</span>}
+                                                </td>
+                                                <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                                  <span style={{ fontSize: 11, color: C.muted }}>{p.dom != null ? p.dom : "—"}</span>
+                                                  {longListed && <div style={{ fontSize: 9, fontWeight: 700, color: C.orange }}>Long listed</div>}
+                                                </td>
+                                                <td style={{ padding: "7px 10px" }}>
+                                                  {p.office && <div style={{ fontSize: 10, color: C.muted }}>{p.office.length > 26 ? p.office.slice(0, 24) + "…" : p.office}</div>}
+                                                  {p.agent && <div style={{ fontSize: 11, color: C.charcoal }}>{p.agent}</div>}
+                                                  {fmtPhone && <div style={{ fontSize: 10, color: C.muted }}>{fmtPhone}</div>}
+                                                  {p.priceReduced && p.priceChangePct != null && (
+                                                    <div style={{ fontSize: 9, fontWeight: 700, color: C.green }}>▼ {Math.abs(p.priceChangePct)}% reduced</div>
+                                                  )}
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </Box>
+                                    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mt: 1.5, pt: 1, borderTop: `1px solid ${C.border}` }}>
+                                      <Typography sx={{ fontSize: 10, color: C.muted }}>Page {page + 1} of {totalPages} · {formLandListings.length} parcels</Typography>
+                                      <Box sx={{ display: "flex", gap: 0.75 }}>
+                                        <button onClick={() => setFormLandPage(0)} disabled={page === 0} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page === 0 ? C.border : C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>«</button>
+                                        <button onClick={() => setFormLandPage(p => Math.max(0, p - 1))} disabled={page === 0} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page === 0 ? C.border : C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>‹ Prev</button>
+                                        <button onClick={() => setFormLandPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page >= totalPages - 1 ? C.border : C.muted, cursor: page >= totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>Next ›</button>
+                                        <button onClick={() => setFormLandPage(totalPages - 1)} disabled={page >= totalPages - 1} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page >= totalPages - 1 ? C.border : C.muted, cursor: page >= totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>»</button>
+                                      </Box>
+                                    </Box>
+                                  </>
+                                )}
+                              </CardContent>
+                            </Card>
+                          );
+                        })()}
+
                       </Box>
                     );
                   })()}
@@ -15719,6 +15867,7 @@ const Dashboard = () => {
                           const met = selCounty.metrics;
                           const rank = allCounties.findIndex(c => c.fips === selFips) + 1;
                           return (
+                            <>
                             <Card elevation={0} sx={{ border: `1px solid ${C.orange}`, borderRadius: 1, overflow: "hidden" }}>
                               <Box sx={{ background: C.orange, px: 2, py: 1.25, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 1 }}>
                                 <Box>
@@ -15739,7 +15888,7 @@ const Dashboard = () => {
                                     {tldrs[`engineered:${selCounty.fips}`] && (
                                       <button onClick={() => setTldrModal({ text: tldrs[`engineered:${selCounty.fips}`], title: `${selCounty.name}, ${selCounty.state}`, accentColor: C.orange, cei: selCounty.cei, thesis: "engineered" })} style={{ fontSize: 10, fontWeight: 700, color: C.orange, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>TLDR</button>
                                     )}
-                                    <button onClick={() => generateAndOpenMarketActionPlan({ county: { ...selCounty, composite: es.composite, tier: es.tier, dims: es.dims }, thesis: "engineered", allCounties: groundScoreData.activation, deepDiveText: deepDives[`engineered:${selCounty.fips}`] || null, tldrText: tldrs[`engineered:${selCounty.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.orange, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                                    <button onClick={() => generateAndOpenMarketActionPlan({ county: { ...selCounty, composite: es.composite, tier: es.tier, dims: es.dims, rank }, thesis: "engineered", allCounties: groundScoreData.activation, neighborPool: [...(groundScoreData.activation||[]),...(groundScoreData.expansion||[]),...(groundScoreData.formation||[])], deepDiveText: deepDives[`engineered:${selCounty.fips}`] || null, tldrText: tldrs[`engineered:${selCounty.fips}`] || null })} style={{ fontSize: 10, fontWeight: 700, color: C.orange, background: C.white, border: `1px solid ${C.white}`, borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
                                       ⬇ Action Plan
                                     </button>
                                     <button onClick={() => requestDeepDive({ fips: selCounty.fips, name: selCounty.name, state: selCounty.state, composite: es.composite, rank, tier: es.tier, population: selCounty.population, dims: Object.fromEntries(es.dims.map(d => [d.id, d.score * 100])), metrics: met }, "engineered", true)} disabled={deepDiveLoading === `engineered:${selCounty.fips}`} style={{ fontSize: 10, fontWeight: 700, color: C.white, background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
@@ -15867,8 +16016,110 @@ const Dashboard = () => {
                                     </Box>
                                   ))}
                                 </Box>
+
                               </CardContent>
                             </Card>
+
+                            {/* ── Land Opportunities Card ── */}
+                            {(() => {
+                              const validPpa = engLandListings.filter(p => p.pricePerAc > 0).map(p => p.pricePerAc).sort((a, b) => a - b);
+                              const medPpa = validPpa.length > 0 ? validPpa[Math.floor(validPpa.length / 2)] : null;
+                              const validDom = engLandListings.filter(p => p.dom != null).map(p => p.dom);
+                              const avgDom = validDom.length > 0 ? Math.round(validDom.reduce((a, b) => a + b, 0) / validDom.length) : null;
+                              const totalPages = Math.ceil(engLandListings.length / ENG_LAND_PAGE_SIZE);
+                              const page = Math.min(engLandPage, Math.max(0, totalPages - 1));
+                              const pageSlice = engLandListings.slice(page * ENG_LAND_PAGE_SIZE, (page + 1) * ENG_LAND_PAGE_SIZE);
+                              return (
+                                <Card elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                                  <CardContent sx={{ pb: "12px !important" }}>
+                                    <SectionHeader
+                                      title="Land Opportunities"
+                                      sub={engLandListings.length > 0 ? `${engLandListings.length} active listings · 50+ acres · 40-mile radius · sorted by acreage · Rentcast MLS` : "50+ acres · 40-mile radius · Rentcast MLS"}
+                                    />
+                                    {engLandLoading && (
+                                      <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, py: 2 }}>
+                                        <l-helix size="18" speed="2.5" color={C.navy}></l-helix>
+                                        <Typography sx={{ fontSize: 12, color: C.muted }}>Fetching active listings…</Typography>
+                                      </Box>
+                                    )}
+                                    {!engLandLoading && engLandListings.length === 0 && engLandFips === selFips && (
+                                      <Typography sx={{ fontSize: 12, color: C.muted, py: 2, textAlign: "center" }}>No active listings found within 40 miles.</Typography>
+                                    )}
+                                    {!engLandLoading && engLandListings.length > 0 && (
+                                      <>
+                                        <Box sx={{ overflowX: "auto" }}>
+                                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                            <thead>
+                                              <tr>
+                                                {["#", "Address", "Acres", "Price", "$/Acre", "vs. Median", "DOM", "Listed By"].map(h => (
+                                                  <th key={h} style={{ padding: "6px 10px", textAlign: "left", color: C.muted, fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                                                ))}
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {pageSlice.map((p, i) => {
+                                                const ppaDelta = medPpa && p.pricePerAc > 0 ? Math.round(((p.pricePerAc - medPpa) / medPpa) * 100) : null;
+                                                const longListed = avgDom != null && p.dom != null && p.dom > avgDom * 1.5;
+                                                const deltaColor = ppaDelta == null ? C.muted : ppaDelta < 0 ? C.green : ppaDelta >= 10 ? C.orange : C.muted;
+                                                const phone = p.agentPhone?.replace(/\D/g, "");
+                                                const fmtPhone = phone?.length === 10 ? `(${phone.slice(0,3)}) ${phone.slice(3,6)}-${phone.slice(6)}` : p.agentPhone;
+                                                return (
+                                                  <tr key={i} style={{ background: i % 2 === 0 ? "transparent" : C.bg }}>
+                                                    <td style={{ padding: "7px 10px", fontSize: 11, fontWeight: 700, color: C.muted }}>{page * ENG_LAND_PAGE_SIZE + i + 1}</td>
+                                                    <td style={{ padding: "7px 10px" }}>
+                                                      <a href={p.listingUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, fontWeight: 700, color: C.navy, textDecoration: "none" }}
+                                                        onMouseOver={e => e.target.style.textDecoration = "underline"}
+                                                        onMouseOut={e => e.target.style.textDecoration = "none"}>
+                                                        {p.street}
+                                                      </a>
+                                                      <div style={{ fontSize: 10, color: C.muted, marginTop: 1 }}>{p.cityStateZip}{p.propertyType && p.propertyType.toLowerCase() !== "land" ? ` · ${p.propertyType}` : ""}</div>
+                                                    </td>
+                                                    <td style={{ padding: "7px 10px", fontSize: 13, fontWeight: 800, color: C.charcoal }}>{p.acres.toLocaleString()}</td>
+                                                    <td style={{ padding: "7px 10px", fontSize: 12, fontWeight: 700, color: C.charcoal, whiteSpace: "nowrap" }}>
+                                                      ${p.price >= 1000000 ? (p.price / 1000000).toFixed(2) + "M" : p.price.toLocaleString()}
+                                                    </td>
+                                                    <td style={{ padding: "7px 10px", fontSize: 11, color: C.muted, whiteSpace: "nowrap" }}>${p.pricePerAc.toLocaleString()}</td>
+                                                    <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                                      {ppaDelta != null ? (
+                                                        <span style={{ fontSize: 10, fontWeight: 700, color: deltaColor, background: deltaColor + "1a", border: `1px solid ${deltaColor}55`, borderRadius: 4, padding: "2px 7px" }}>
+                                                          {ppaDelta > 0 ? "+" : ""}{ppaDelta}%
+                                                        </span>
+                                                      ) : <span style={{ fontSize: 10, color: C.muted }}>—</span>}
+                                                    </td>
+                                                    <td style={{ padding: "7px 10px", whiteSpace: "nowrap" }}>
+                                                      <span style={{ fontSize: 11, color: C.muted }}>{p.dom != null ? p.dom : "—"}</span>
+                                                      {longListed && <div style={{ fontSize: 9, fontWeight: 700, color: C.orange }}>Long listed</div>}
+                                                    </td>
+                                                    <td style={{ padding: "7px 10px" }}>
+                                                      {p.office && <div style={{ fontSize: 10, color: C.muted }}>{p.office.length > 26 ? p.office.slice(0, 24) + "…" : p.office}</div>}
+                                                      {p.agent && <div style={{ fontSize: 11, color: C.charcoal }}>{p.agent}</div>}
+                                                      {fmtPhone && <div style={{ fontSize: 10, color: C.muted }}>{fmtPhone}</div>}
+                                                      {p.priceReduced && p.priceChangePct != null && (
+                                                        <div style={{ fontSize: 9, fontWeight: 700, color: C.green }}>▼ {Math.abs(p.priceChangePct)}% reduced</div>
+                                                      )}
+                                                    </td>
+                                                  </tr>
+                                                );
+                                              })}
+                                            </tbody>
+                                          </table>
+                                        </Box>
+                                        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mt: 1.5, pt: 1, borderTop: `1px solid ${C.border}` }}>
+                                          <Typography sx={{ fontSize: 10, color: C.muted }}>Page {page + 1} of {totalPages} · {engLandListings.length} parcels</Typography>
+                                          <Box sx={{ display: "flex", gap: 0.75 }}>
+                                            <button onClick={() => setEngLandPage(0)} disabled={page === 0} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page === 0 ? C.border : C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>«</button>
+                                            <button onClick={() => setEngLandPage(p => Math.max(0, p - 1))} disabled={page === 0} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page === 0 ? C.border : C.muted, cursor: page === 0 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>‹ Prev</button>
+                                            <button onClick={() => setEngLandPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page >= totalPages - 1 ? C.border : C.muted, cursor: page >= totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>Next ›</button>
+                                            <button onClick={() => setEngLandPage(totalPages - 1)} disabled={page >= totalPages - 1} style={{ fontSize: 10, padding: "3px 8px", border: `1px solid ${C.border}`, borderRadius: 4, background: "transparent", color: page >= totalPages - 1 ? C.border : C.muted, cursor: page >= totalPages - 1 ? "default" : "pointer", fontFamily: "'Inter',sans-serif" }}>»</button>
+                                          </Box>
+                                        </Box>
+                                      </>
+                                    )}
+                                  </CardContent>
+                                </Card>
+                              );
+                            })()}
+                            </>
                           );
                         })()}
                       </Box>

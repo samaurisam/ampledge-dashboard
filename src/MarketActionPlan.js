@@ -17,6 +17,7 @@ import {
   ClipPath,
   Image,
 } from "@react-pdf/renderer";
+import { NEOPOLI_DIMS, OPPORTUNITY_DIMS } from "./data";
 
 Font.registerHyphenationCallback((word) => [word]);
 
@@ -94,14 +95,6 @@ const CEI_COLOR = {
   Neutral: P.muted,
 };
 
-const CEI_LABEL_ORDER = [
-  "Early Leader",
-  "Mature Cluster",
-  "Structural Isolation",
-  "Regional Laggard",
-  "Neutral",
-];
-
 const CEI_THESIS_IMPLICATIONS = {
   activation: {
     "Early Leader": {
@@ -171,28 +164,35 @@ const CEI_THESIS_IMPLICATIONS = {
   },
   engineered: {
     "Early Leader": {
-      verdict: "Optimal Site Timing",
-      body: "This county leads neighboring markets on engineered fundamentals (workforce, land, infrastructure). A facility commitment here may establish first-mover advantage before regional labor costs and land values increase due to cluster demand.",
+      verdict: "Regional Validation — Act on Site Control",
+      body: "This market leads its neighbors on the engineered scoring model — labor availability, infrastructure, and land cost are more favorable here than in the surrounding region. For an employer site decision, this is the strongest regional validation signal: the inputs that make employer investment viable are concentrated in this county. Site control and incentive package assembly should move with urgency.",
     },
     "Mature Cluster": {
-      verdict: "Regional Labor Ecosystem Intact",
-      body: "Multiple neighboring counties also score well for industrial site selection — indicating a developed regional labor and logistics ecosystem. Site selection here benefits from established supply chains, vendors, and workforce pipelines.",
+      verdict: "Proven Industrial Region",
+      body: "This county sits within a proven industrial or logistics cluster — multiple neighboring counties are also scoring well on employer-site metrics. This has two implications: (1) the regional infrastructure and labor pool are established and reliable, and (2) competing employers and developers are already active in the area. Use the cluster as validation but negotiate hard on incentives — the county knows it's in a competitive region.",
     },
     "Structural Isolation": {
-      verdict: "Site-Specific Case Only",
-      body: "Strong standalone engineered fundamentals but no regional labor ecosystem to draw from. Workforce must be largely sourced locally or through training partnerships. Validate local labor pool depth before committing to headcount projections.",
+      verdict: "Incentive Leverage is High",
+      body: "Strong employer-site metrics but neighbors are weak. This county may have a specific infrastructure advantage (rail access, highway interchange, utility capacity) that neighbors lack. Isolation means less competition from other employers, which increases your incentive negotiating leverage. Validate that the infrastructure advantage is genuine and durable. The workforce commute shed may be the binding constraint in an isolated market.",
     },
     "Regional Laggard": {
       verdict: "Revisit Site Selection",
-      body: "Adjacent counties score better on the engineered model — stronger labor pools, better infrastructure, or lower land costs. Unless a specific parcel, incentive package, or anchor tenant requirement applies, the site selection case is stronger in a neighboring market.",
+      body: "Adjacent counties score better on the engineered model — stronger labor pools, better infrastructure, or lower land costs. Unless there's a very specific reason to be in this county (unique parcel, specific incentive package, anchor tenant requirement), the site selection case is stronger in a neighboring market. Present both options to the employer before committing.",
     },
     Neutral: {
       verdict: "Site-Specific Factors Dominate",
-      body: "No strong regional cluster signal in either direction. The employer site decision comes down to parcel availability, zoning, utility capacity, proximity to workforce, and incentive package. Standard engineered market diligence applies.",
+      body: "No strong regional cluster signal in either direction. The employer site decision comes down to site-specific factors: parcel availability, zoning, utility capacity, proximity to workforce, and incentive package. Standard engineered market diligence applies.",
     },
   },
 };
 
+function fmtPhone(v) {
+  if (!v) return "";
+  const d = String(v).replace(/\D/g, "");
+  if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  if (d.length === 11 && d[0] === "1") return `(${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`;
+  return v;
+}
 function fmtNum(v, decimals = 0, fallback = "—") {
   if (v == null || isNaN(v)) return fallback;
   return Number(v).toLocaleString("en-US", {
@@ -239,7 +239,13 @@ function parseMd(text) {
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) {
-      segs.push({ type: "spacer" });
+      // collapse consecutive spacers
+      if (segs.length && segs[segs.length - 1].type !== "spacer")
+        segs.push({ type: "spacer" });
+      continue;
+    }
+    // skip horizontal rules entirely
+    if (/^-{3,}$/.test(line) || /^\*{3,}$/.test(line) || /^_{3,}$/.test(line)) {
       continue;
     }
     if (line.startsWith("## ")) {
@@ -268,6 +274,8 @@ function parseMd(text) {
     }
     segs.push({ type: "para", text: line });
   }
+  // trim trailing spacer
+  while (segs.length && segs[segs.length - 1].type === "spacer") segs.pop();
   return segs;
 }
 
@@ -1039,34 +1047,103 @@ const THESIS_MIN_ACRES = {
   engineered: 50, // employer site
 };
 
-async function fetchLandListings(lat, lon, thesis) {
+export async function fetchLandListings(lat, lon, thesis, limit = 10) {
   const minAcres = THESIS_MIN_ACRES[thesis] || 25;
   const minSqft = minAcres * 43560;
   const apiKey = process.env.REACT_APP_RENTCAST_KEY;
   if (!apiKey) return [];
   try {
-    const url = `https://api.rentcast.io/v1/listings/sale?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}&radius=40&propertyType=Land&status=Active&limit=50`;
-    const res = await fetch(url, { headers: { "X-Api-Key": apiKey } });
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (!Array.isArray(data)) return [];
-    return data
+    // Query without propertyType filter — Rentcast classifies many large rural
+    // parcels as Single Family or other types, so filtering by lotSize alone
+    // casts a much wider net than propertyType=Land.
+    const pages = await Promise.allSettled([
+      fetch(
+        `https://api.rentcast.io/v1/listings/sale?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}&radius=40&status=Active&limit=500&offset=0`,
+        { headers: { "X-Api-Key": apiKey } }
+      ),
+      fetch(
+        `https://api.rentcast.io/v1/listings/sale?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}&radius=40&status=Active&limit=500&offset=500`,
+        { headers: { "X-Api-Key": apiKey } }
+      ),
+    ]);
+
+    const allData = [];
+    for (const p of pages) {
+      if (p.status === "fulfilled" && p.value.ok) {
+        const d = await p.value.json();
+        if (Array.isArray(d)) allData.push(...d);
+      }
+    }
+
+    // Deduplicate by MLS number or address
+    const seen = new Set();
+    const unique = allData.filter((p) => {
+      const key = p.mlsNumber || p.formattedAddress || p.addressLine1;
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    return unique
       .filter((p) => (p.lotSize || 0) >= minSqft && (p.price || 0) > 0)
       .sort((a, b) => (b.lotSize || 0) - (a.lotSize || 0))
-      .slice(0, 8)
-      .map((p) => ({
-        address: p.formattedAddress || p.addressLine1 || "—",
-        city: p.city || "—",
-        acres: parseFloat(((p.lotSize || 0) / 43560).toFixed(1)),
-        price: p.price || 0,
-        pricePerAc:
-          p.lotSize > 0 ? Math.round(p.price / (p.lotSize / 43560)) : 0,
-        dom: p.daysOnMarket || null,
-        mls: p.mlsNumber || null,
-        agent: p.listingAgent?.name || null,
-        office: p.listingOffice?.name || null,
-        listedDate: p.listedDate ? p.listedDate.slice(0, 10) : null,
-      }));
+      .slice(0, limit ?? Infinity)
+      .map((p) => {
+        const acres = parseFloat(((p.lotSize || 0) / 43560).toFixed(1));
+        const cityStateZip = [
+          p.city,
+          p.state && p.zipCode
+            ? `${p.state} ${p.zipCode}`
+            : p.state || p.zipCode || null,
+        ]
+          .filter(Boolean)
+          .join(", ");
+
+        // Parse history for price changes
+        const historyEntries = p.history
+          ? Object.entries(p.history).sort(([a], [b]) => a.localeCompare(b))
+          : [];
+        const originalEntry = historyEntries[0]?.[1];
+        const originalPrice =
+          originalEntry?.price && originalEntry.price !== p.price
+            ? originalEntry.price
+            : null;
+        const priceReduced =
+          originalPrice != null && originalPrice > p.price;
+        const priceIncreased =
+          originalPrice != null && originalPrice < p.price;
+        const priceChangePct =
+          originalPrice != null
+            ? Math.round(
+                ((p.price - originalPrice) / originalPrice) * 100
+              )
+            : null;
+
+        return {
+          street: p.addressLine1 || p.formattedAddress?.split(",")[0] || "—",
+          cityStateZip: cityStateZip || "—",
+          acres,
+          price: p.price || 0,
+          pricePerAc: acres > 0 ? Math.round(p.price / acres) : 0,
+          dom: p.daysOnMarket ?? null,
+          listedDate: p.listedDate ? p.listedDate.slice(0, 10) : null,
+          mls: p.mlsNumber || null,
+          mlsName: p.mlsName || null,
+          agent: p.listingAgent?.name || null,
+          agentPhone: p.listingAgent?.phone || null,
+          office: p.listingOffice?.name || null,
+          propertyType: p.propertyType || null,
+          // Price history
+          originalPrice,
+          priceReduced,
+          priceIncreased,
+          priceChangePct,
+          historyCount: historyEntries.length,
+          listingUrl: p.mlsNumber
+            ? `https://www.google.com/search?q=${encodeURIComponent(`MLS ${p.mlsNumber} ${p.state || ""} land for sale`)}`
+            : `https://www.google.com/search?q=${encodeURIComponent(`${p.addressLine1 || ""} ${p.city || ""} ${p.state || ""} land for sale`.trim())}`,
+        };
+      });
   } catch (e) {
     console.warn("[LandListings] fetch failed:", e.message);
     return [];
@@ -1326,9 +1403,9 @@ const s = StyleSheet.create({
 
   // Body layout
   body: { paddingHorizontal: 36, paddingTop: 20, paddingBottom: 48 },
-  cols: { flexDirection: "row", gap: 14 },
+  cols: { flexDirection: "row", gap: 24 },
   col: { flex: 1 },
-  colWide: { flex: 1.6 },
+  colWide: { flex: 1.5 },
   colNarrow: { flex: 1 },
 
   // Page header
@@ -1352,7 +1429,7 @@ const s = StyleSheet.create({
   pageHeaderR: { fontSize: 7, color: P.muted },
 
   // Section headers
-  sec: { marginTop: 18, marginBottom: 10 },
+  sec: { marginTop: 12, marginBottom: 7 },
   secAccent: {
     width: 28,
     height: 2,
@@ -1372,7 +1449,7 @@ const s = StyleSheet.create({
   bigStatRow: { flexDirection: "row", gap: 10, marginBottom: 14 },
   bigStat: {
     flex: 1,
-    padding: "12 14",
+    padding: "6 14",
     backgroundColor: P.light,
     borderTopWidth: 3,
     borderTopColor: P.navy,
@@ -1434,7 +1511,6 @@ const s = StyleSheet.create({
 
   // CEI card
   ceiCard: {
-    borderWidth: 1.5,
     borderRadius: 3,
     padding: "12 14",
     marginBottom: 12,
@@ -1471,12 +1547,10 @@ const s = StyleSheet.create({
   },
   ceiStatVal: { fontSize: 11, fontFamily: "Helvetica-Bold", color: P.ink },
   ceiNote: {
-    fontSize: 7.5,
+    fontSize: 8,
     color: P.sub,
-    lineHeight: 1.5,
-    backgroundColor: P.light,
-    padding: "6 8",
-    borderRadius: 2,
+    lineHeight: 1.6,
+    marginTop: 4,
   },
 
   // Tables
@@ -1559,7 +1633,7 @@ const s = StyleSheet.create({
   },
 
   // Narrative blocks
-  para: { fontSize: 8.5, color: P.sub, lineHeight: 1.65, marginBottom: 6 },
+  para: { fontSize: 8.5, color: P.sub, lineHeight: 1.55, marginBottom: 4 },
   paraB: {
     fontSize: 8.5,
     fontFamily: "Helvetica-Bold",
@@ -1606,9 +1680,10 @@ const s = StyleSheet.create({
     letterSpacing: 1.5,
     paddingVertical: 5,
     paddingHorizontal: 10,
-    backgroundColor: P.navy,
+    // backgroundColor: P.navy,
     marginBottom: 0,
     marginTop: 12,
+    borderRadius: 2,
   },
   actionRow: {
     flexDirection: "row",
@@ -1637,48 +1712,53 @@ const s = StyleSheet.create({
   actionOwner: { fontSize: 6.5, color: P.muted, marginTop: 2 },
 
   // Diligence checklist
-  dlSection: { marginBottom: 12 },
+  dlSection: { marginBottom: 18 },
   dlHeader: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "baseline",
     justifyContent: "space-between",
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    backgroundColor: P.navy,
+    paddingBottom: 5,
+    borderBottomWidth: 1.5,
+    borderBottomColor: P.navy,
     marginBottom: 0,
   },
-  dlHeaderT: { fontSize: 7.5, fontFamily: "Helvetica-Bold", color: P.white },
+  dlHeaderT: {
+    fontSize: 9,
+    fontFamily: "Helvetica-Bold",
+    color: P.navy,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
   dlPriority: { paddingVertical: 2, paddingHorizontal: 6, borderRadius: 1 },
   dlPriorityT: {
-    fontSize: 6,
+    fontSize: 8,
     fontFamily: "Helvetica-Bold",
-    letterSpacing: 0.8,
+    letterSpacing: 1,
   },
   dlItem: {
     flexDirection: "row",
-    gap: 8,
+    gap: 7,
     paddingVertical: 5,
-    paddingHorizontal: 10,
+    paddingHorizontal: 2,
     borderBottomWidth: 0.5,
     borderBottomColor: P.border,
     backgroundColor: P.white,
     alignItems: "center",
   },
   dlCheckbox: {
-    width: 10,
-    height: 10,
+    width: 9,
+    height: 9,
     borderWidth: 1,
     borderColor: P.border,
-    borderRadius: 1,
+    borderRadius: 0,
     flexShrink: 0,
   },
-  dlItemT: { fontSize: 8, color: P.ink, flex: 1 },
+  dlItemT: { fontSize: 7.5, color: P.ink, flex: 1 },
   dlStatus: {
-    width: 60,
-    borderWidth: 1,
-    borderColor: P.border,
-    height: 12,
-    borderRadius: 1,
+    width: 55,
+    borderBottomWidth: 1,
+    borderBottomColor: P.border,
+    height: 10,
   },
 
   // Neighbor card
@@ -1720,15 +1800,12 @@ const s = StyleSheet.create({
 
   // Employer brief
   empSection: {
-    borderLeftWidth: 3,
-    borderLeftColor: P.emerald,
-    paddingLeft: 12,
     marginBottom: 14,
   },
   empTitle: {
     fontSize: 7,
     fontFamily: "Helvetica-Bold",
-    color: P.emerald,
+    color: P.navy,
     textTransform: "uppercase",
     letterSpacing: 1,
     marginBottom: 5,
@@ -1821,7 +1898,7 @@ const s = StyleSheet.create({
     textTransform: "uppercase",
     marginBottom: 6,
   },
-  tldrText: { fontSize: 10, color: P.navy, lineHeight: 1.35 },
+  tldrText: { fontSize: 12, color: P.navy, lineHeight: 1.25 },
 
   // Methodology box
   methBox: {
@@ -1854,7 +1931,7 @@ const s = StyleSheet.create({
     flex: 1,
     padding: "8 10",
     borderRadius: 3,
-    borderWidth: 1,
+    // borderWidth: 1,
   },
   findLbl: {
     fontSize: 5.5,
@@ -1904,20 +1981,11 @@ function SecHeader({ title, sub }) {
   );
 }
 
-function ScoreBar({ label, score, maxScore = 100, color }) {
-  const pct = Math.min(100, Math.max(0, (score / maxScore) * 100));
-  const barColor = color || scoreColor(score);
+function SecHeaderClean({ title, sub }) {
   return (
-    <View style={s.scoreWrap}>
-      <View style={s.scoreLbl}>
-        <Text style={s.scoreName}>{label}</Text>
-        <Text style={[s.scoreVal, { color: barColor }]}>{fmtScore(score)}</Text>
-      </View>
-      <View style={s.scoreTrack}>
-        <View
-          style={[s.scoreFill, { width: `${pct}%`, backgroundColor: barColor }]}
-        />
-      </View>
+    <View style={s.sec}>
+      <Text style={s.secT}>{title}</Text>
+      {sub && <Text style={s.secSub}>{sub}</Text>}
     </View>
   );
 }
@@ -1936,8 +2004,8 @@ function RiskBadge({ level }) {
   );
 }
 
-function MdBlock({ text }) {
-  const segs = parseMd(text || "");
+function MdBlock({ text, segs: propSegs }) {
+  const segs = propSegs || parseMd(text || "");
   return (
     <View>
       {segs.map((seg, i) => {
@@ -1963,7 +2031,7 @@ function MdBlock({ text }) {
         if (seg.type === "bullet") {
           const parts = parseInline(seg.text);
           return (
-            <View key={i} style={s.bullet}>
+            <View key={i} style={s.bullet} wrap={false}>
               <View style={s.bulletDot} />
               <Text style={s.bulletT}>
                 {parts.map((p, j) =>
@@ -2321,13 +2389,13 @@ function TocPage({ county, thesis, generatedDate }) {
     },
     {
       n: "04",
-      title: "Regional Context",
-      sub: "Cluster Emergence Index and regional competitive positioning",
+      title: "Neighboring Markets",
+      sub: "Cluster Emergence Index and contiguous market analysis",
     },
     {
       n: "05",
-      title: "Neighboring Markets",
-      sub: "Qualifying contiguous counties and their thesis relevance",
+      title: "Thesis Risk Factors",
+      sub: "What kills the thesis — likelihood, impact, and mitigation",
     },
     {
       n: "06",
@@ -2341,11 +2409,6 @@ function TocPage({ county, thesis, generatedDate }) {
     },
     {
       n: "08",
-      title: "Risk Register",
-      sub: "What kills the thesis — likelihood, impact, and mitigation",
-    },
-    {
-      n: "09",
       title: "Employer / Stakeholder Brief",
       sub: "Outward-facing profile for employer and partner conversations",
     },
@@ -2430,6 +2493,61 @@ function ChapterDivider({ num, title, sub, countyName, thesis }) {
   );
 }
 
+// ─── Signal colour helper (matches app DIMENSION_DETAILS tier thresholds) ─────
+const SIG_G = "#0e7634"; // green  — top tier
+const SIG_OK = "#1cad51"; // light green — good
+const SIG_W = "#fbbf24"; // amber  — caution
+const SIG_R = "#f87171"; // red    — bad
+
+function signalColor(thesis, lbl, raw) {
+  if (raw == null) return SIG_W;
+  switch (lbl) {
+    case "Unemployment":
+      if (thesis === "activation" || thesis === "engineered") {
+        // High unemployment = labor slack = good for these theses
+        return raw > 5 ? SIG_G : raw >= 3 ? SIG_OK : raw >= 2 ? SIG_W : SIG_R;
+      }
+      // Expansion/formation: low unemployment = thriving = good
+      return raw < 3 ? SIG_G : raw < 5 ? SIG_OK : raw < 7 ? SIG_W : SIG_R;
+    case "Home Values": {
+      const g = raw * 100; // zhvi_growth_1yr is decimal (0.042 = 4.2%)
+      return g > 5 ? SIG_G : g > 2 ? SIG_OK : g >= 0 ? SIG_W : SIG_R;
+    }
+    case "Median HHI":
+      return raw >= 65000
+        ? SIG_G
+        : raw >= 50000
+          ? SIG_OK
+          : raw >= 40000
+            ? SIG_W
+            : SIG_R;
+    case "Population Growth":
+      return raw > 0.01
+        ? SIG_G
+        : raw > 0
+          ? SIG_OK
+          : raw > -0.01
+            ? SIG_W
+            : SIG_R;
+    case "Business Formation":
+      return raw > 10 ? SIG_G : raw > 5 ? SIG_OK : raw > 2 ? SIG_W : SIG_R;
+    case "Permit Activity":
+      return raw > 5 ? SIG_G : raw > 3 ? SIG_OK : raw > 1 ? SIG_W : SIG_R;
+    case "Broadband":
+      return raw > 80 ? SIG_G : raw > 60 ? SIG_OK : raw > 40 ? SIG_W : SIG_R;
+    case "Land Basis":
+      return raw < 2500
+        ? SIG_G
+        : raw < 5000
+          ? SIG_OK
+          : raw < 10000
+            ? SIG_W
+            : SIG_R;
+    default:
+      return raw > 0 ? SIG_OK : SIG_W;
+  }
+}
+
 // ─── Ch 01: Executive Brief ───────────────────────────────────────────────────
 function ExecBriefPage({ county, thesis, defaults, tldrText }) {
   const composite = Math.round(county.composite || 0);
@@ -2452,6 +2570,7 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
           ? `${fmtPct(m.zhvi_growth_1yr * 100)} 1-yr`
           : "Zillow ZHVI",
       pos: m.zhvi_growth_1yr > 0.03,
+      color: signalColor(thesis, "Home Values", m.zhvi_growth_1yr),
     });
   if (m.unemployment_rate != null)
     findings.push({
@@ -2465,6 +2584,7 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
         thesis === "activation" || thesis === "engineered"
           ? m.unemployment_rate > 4
           : m.unemployment_rate < 5,
+      color: signalColor(thesis, "Unemployment", m.unemployment_rate),
     });
   if (m.median_hhi != null)
     findings.push({
@@ -2472,6 +2592,7 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
       val: `$${fmtNum(m.median_hhi / 1000, 0)}k`,
       sub: "Census ACS",
       pos: m.median_hhi > 45000,
+      color: signalColor(thesis, "Median HHI", m.median_hhi),
     });
   if (m.pop_growth_pct != null)
     findings.push({
@@ -2479,6 +2600,7 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
       val: fmtPct(m.pop_growth_pct),
       sub: "5-yr CAGR",
       pos: m.pop_growth_pct > 0,
+      color: signalColor(thesis, "Population Growth", m.pop_growth_pct),
     });
   if (m.biz_apps_per_1k != null)
     findings.push({
@@ -2486,6 +2608,7 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
       val: `${fmtNum(m.biz_apps_per_1k, 1)}/1k`,
       sub: "Census BFS",
       pos: m.biz_apps_per_1k > 5,
+      color: signalColor(thesis, "Business Formation", m.biz_apps_per_1k),
     });
   if (m.permit_units_per_1k != null)
     findings.push({
@@ -2493,6 +2616,7 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
       val: `${fmtNum(m.permit_units_per_1k, 1)}/1k`,
       sub: "Census BPS",
       pos: m.permit_units_per_1k > 3,
+      color: signalColor(thesis, "Permit Activity", m.permit_units_per_1k),
     });
   if (m.broadband_pct != null)
     findings.push({
@@ -2500,6 +2624,7 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
       val: `${fmtNum(m.broadband_pct, 0)}%`,
       sub: "FCC coverage",
       pos: m.broadband_pct > 80,
+      color: signalColor(thesis, "Broadband", m.broadband_pct),
     });
   if (m.farmland_value_acre != null)
     findings.push({
@@ -2507,6 +2632,7 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
       val: `$${fmtNum(m.farmland_value_acre / 1000, 1)}k/ac`,
       sub: "USDA",
       pos: m.farmland_value_acre < 5000,
+      color: signalColor(thesis, "Land Basis", m.farmland_value_acre),
     });
   const topFindings = findings.slice(0, 6);
 
@@ -2550,7 +2676,7 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
           </View>
           {rank && (
             <View style={[s.bigStat, { borderTopColor: tc }]}>
-              <Text style={[s.bigStatV, { color: tc }]}>#{fmtNum(rank)}</Text>
+              <Text style={[s.bigStatV, { color: tc }]}>{fmtNum(rank)}</Text>
               <Text style={s.bigStatLbl}>National Rank</Text>
               <Text style={s.bigStatSub}>Across scored universe</Text>
             </View>
@@ -2587,51 +2713,157 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
         <View style={s.cols}>
           {/* Left col: thesis + scoring process + CEI + primary risk */}
           <View style={s.colWide}>
-            <SecHeader title={`What is the ${THESIS_LABEL[thesis]} Thesis`} />
+            <SecHeaderClean title={`${THESIS_LABEL[thesis]} Thesis`} />
             <Text style={s.para}>{THESIS_DESCRIPTION[thesis]}</Text>
 
-            <SecHeader title="How Ground Score Works" />
-            <View style={s.methBox}>
-              <Text style={s.methHead}>Scoring Methodology</Text>
-              <Text style={s.methText}>{METHODOLOGY_BRIEF}</Text>
-            </View>
+            <SecHeaderClean title="Scoring Model" />
+            <Text style={s.para}>{METHODOLOGY_BRIEF}</Text>
 
-            <SecHeader
-              title="This Market's Position"
+            <SecHeaderClean
+              title="This Market"
               sub={`${THESIS_LABEL[thesis]} · Why it qualifies`}
             />
             <Text style={s.para}>{defaults.thesis_fit}</Text>
 
-            {cei && (
-              <View style={s.pullQuote}>
-                <Text style={s.pullQuoteT}>
-                  "{cei.label}" — this market scores{" "}
-                  {cei.gap != null
-                    ? `${Math.abs(Math.round(cei.gap))} points ${cei.gap >= 0 ? "above" : "below"} its ${fmtNum(cei.neighbor_count || 0)} contiguous neighbors (avg ${fmtNum(cei.neighbor_avg || 0, 1)})`
-                    : "within its regional cluster"}
-                  .{" "}
-                  {CEI_THESIS_IMPLICATIONS[thesis]?.[cei.label]?.verdict || ""}
-                </Text>
-              </View>
-            )}
-
-            {topRisk && (
-              <View style={s.riskFlag}>
-                <View>
-                  <Text style={s.riskFlagT}>Primary Risk to Monitor</Text>
-                  <Text style={s.riskFlagB}>
-                    {topRisk.risk}: {topRisk.mitigation}
-                  </Text>
-                </View>
-              </View>
-            )}
+            {cei &&
+              (() => {
+                const impl = CEI_THESIS_IMPLICATIONS[thesis]?.[cei.label];
+                const ceiColor = CEI_COLOR[cei.label] || P.muted;
+                return (
+                  <>
+                    <SecHeaderClean
+                      title={cei.label}
+                      sub={
+                        impl?.verdict
+                          ? `${impl.verdict} · ${cei.gap != null ? `${Math.abs(Math.round(cei.gap))} pts ${cei.gap >= 0 ? "above" : "below"} ${fmtNum(cei.neighbor_count || 0)} neighbors` : "regional cluster"}`
+                          : undefined
+                      }
+                    />
+                    <Text style={s.para}>{impl?.body || ""}</Text>
+                    {/* CEI stat row */}
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        marginTop: 8,
+                        gap: 0,
+                        borderTopWidth: 1,
+                        borderTopColor: P.border,
+                        paddingTop: 8,
+                      }}
+                    >
+                      {cei.neighbor_avg != null && (
+                        <View style={{ flex: 1 }}>
+                          <Text
+                            style={{
+                              fontSize: 5.5,
+                              fontFamily: "Helvetica-Bold",
+                              color: P.muted,
+                              textTransform: "uppercase",
+                              letterSpacing: 0.8,
+                              marginBottom: 2,
+                            }}
+                          >
+                            Regional{"\n"}Avg Score
+                          </Text>
+                          <Text
+                            style={{
+                              fontSize: 13,
+                              fontFamily: "Helvetica-Bold",
+                              color: P.navy,
+                            }}
+                          >
+                            {fmtNum(cei.neighbor_avg, 1)}
+                          </Text>
+                        </View>
+                      )}
+                      {cei.gap != null && (
+                        <View style={{ flex: 1 }}>
+                          <Text
+                            style={{
+                              fontSize: 5.5,
+                              fontFamily: "Helvetica-Bold",
+                              color: P.muted,
+                              textTransform: "uppercase",
+                              letterSpacing: 0.8,
+                              marginBottom: 2,
+                            }}
+                          >
+                            Gap vs.{"\n"}Neighbors
+                          </Text>
+                          <Text
+                            style={{
+                              fontSize: 13,
+                              fontFamily: "Helvetica-Bold",
+                              color: cei.gap >= 0 ? P.emerald : P.red,
+                            }}
+                          >
+                            {cei.gap >= 0 ? "+" : ""}
+                            {fmtNum(cei.gap, 1)}
+                          </Text>
+                        </View>
+                      )}
+                      {cei.neighbor_count != null && (
+                        <View style={{ flex: 1 }}>
+                          <Text
+                            style={{
+                              fontSize: 5.5,
+                              fontFamily: "Helvetica-Bold",
+                              color: P.muted,
+                              textTransform: "uppercase",
+                              letterSpacing: 0.8,
+                              marginBottom: 2,
+                            }}
+                          >
+                            Qualifying Neighbors
+                          </Text>
+                          <Text
+                            style={{
+                              fontSize: 13,
+                              fontFamily: "Helvetica-Bold",
+                              color: P.navy,
+                            }}
+                          >
+                            {cei.density} / {cei.neighbor_count}
+                          </Text>
+                        </View>
+                      )}
+                      {county.composite != null &&
+                        cei.adjusted_composite != null && (
+                          <View style={{ flex: 1 }}>
+                            <Text
+                              style={{
+                                fontSize: 5.5,
+                                fontFamily: "Helvetica-Bold",
+                                color: P.muted,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.8,
+                                marginBottom: 2,
+                              }}
+                            >
+                              Adjusted Composite
+                            </Text>
+                            <Text
+                              style={{
+                                fontSize: 13,
+                                fontFamily: "Helvetica-Bold",
+                                color: CEI_COLOR[cei.label] || P.navy,
+                              }}
+                            >
+                              {fmtNum(cei.adjusted_composite * 100, 1)}
+                            </Text>
+                          </View>
+                        )}
+                    </View>
+                  </>
+                );
+              })()}
           </View>
 
           {/* Right col: key findings + immediate actions */}
           <View style={s.colNarrow}>
             {topFindings.length > 0 && (
               <>
-                <SecHeader
+                <SecHeaderClean
                   title="Key Market Signals"
                   sub="Highlights from Ground Score data"
                 />
@@ -2642,18 +2874,29 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
                       style={[
                         s.findCard,
                         {
-                          borderColor: f.pos ? P.emerald + "55" : P.border,
-                          backgroundColor: f.pos ? P.emerald + "06" : P.light,
+                          backgroundColor: (f.color || SIG_OK) + "18",
                         },
                       ]}
                     >
-                      <Text style={s.findLbl}>{f.lbl}</Text>
-                      <Text
-                        style={[
-                          s.findVal,
-                          { color: f.pos ? P.emerald : P.navy },
-                        ]}
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          marginBottom: 3,
+                        }}
                       >
+                        <View
+                          style={{
+                            width: 5,
+                            height: 5,
+                            borderRadius: 3,
+                            backgroundColor: f.color || SIG_OK,
+                            marginRight: 4,
+                          }}
+                        />
+                        <Text style={s.findLbl}>{f.lbl}</Text>
+                      </View>
+                      <Text style={[s.findVal, { color: f.color || P.navy }]}>
                         {f.val}
                       </Text>
                       <Text style={s.findSub}>{f.sub}</Text>
@@ -2701,265 +2944,776 @@ function ExecBriefPage({ county, thesis, defaults, tldrText }) {
 
 // ─── Ch 02: Why This Market ───────────────────────────────────────────────────
 function WhyThisMarketPage({ county, thesis, deepDiveText }) {
+  const name = county.name || county.county_name;
   const text =
     deepDiveText ||
     `No deep dive available. Generate a deep dive from the market detail panel to populate this chapter with AI-generated market analysis tailored to the ${THESIS_LABEL[thesis]} thesis.`;
+
+  const allSegs = parseMd(text);
+  // Split into 4 equal chunks — each page gets two columns (left=chunk[0], right=chunk[1])
+  const q = Math.ceil(allSegs.length / 4);
+  const trim = (arr) => (arr[0]?.type === "spacer" ? arr.slice(1) : arr);
+  const chunks = [
+    trim(allSegs.slice(0, q)),
+    trim(allSegs.slice(q, q * 2)),
+    trim(allSegs.slice(q * 2, q * 3)),
+    trim(allSegs.slice(q * 3)),
+  ];
+  const hasPage2 = chunks[2].length > 0 || chunks[3].length > 0;
+
   return (
-    <Page size="LETTER" style={s.page}>
-      <PageHeader
-        countyName={county.name || county.county_name}
-        chapter="02 — Why This Market"
-      />
-      <View style={s.body}>
-        <View style={s.cols}>
-          <View style={s.col}>
-            <SecHeader
-              title="Market Analysis"
-              sub={`${THESIS_LABEL[thesis]} Thesis · Deep Dive`}
-            />
-            <MdBlock text={text.slice(0, Math.ceil(text.length / 2))} />
-          </View>
-          <View style={s.col}>
-            <View style={{ marginTop: 28 }}>
-              <MdBlock text={text.slice(Math.ceil(text.length / 2))} />
+    <>
+      <Page size="LETTER" style={s.page}>
+        <PageHeader countyName={name} chapter="02 — Why This Market" />
+        <View style={s.body}>
+          <View style={s.cols}>
+            <View style={s.col}>
+              <SecHeader
+                title="Market Analysis"
+                sub={`${THESIS_LABEL[thesis]} Thesis · Deep Dive`}
+              />
+              <MdBlock segs={chunks[0]} />
+            </View>
+            <View style={s.col}>
+              <View style={{ marginTop: 28 }}>
+                <MdBlock segs={chunks[1]} />
+              </View>
             </View>
           </View>
         </View>
-      </View>
-      <Footer
-        countyName={county.name || county.county_name}
-        thesis={thesis}
-        pageLabel="Why This Market"
-      />
-    </Page>
+        <Footer countyName={name} thesis={thesis} pageLabel="Why This Market" />
+      </Page>
+
+      {hasPage2 && (
+        <Page size="LETTER" style={s.page}>
+          <PageHeader countyName={name} chapter="02 — Why This Market" />
+          <View style={s.body}>
+            <View style={s.cols}>
+              <View style={s.col}>
+                <MdBlock segs={chunks[2]} />
+              </View>
+              <View style={s.col}>
+                <MdBlock segs={chunks[3]} />
+              </View>
+            </View>
+          </View>
+          <Footer
+            countyName={name}
+            thesis={thesis}
+            pageLabel="Why This Market"
+          />
+        </Page>
+      )}
+    </>
   );
 }
 
+// ─── Housing finance helpers (mirrors App.js) ────────────────────────────────
+const _mMortgage = (hv, dp, rate = 0.07, yrs = 30) => {
+  if (!hv || dp == null) return null;
+  const loan = hv * (1 - dp),
+    r = rate / 12,
+    n = yrs * 12;
+  return (loan * r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1);
+};
+const _mPMI = (hv, dp) =>
+  !hv || dp == null || dp >= 0.2 ? 0 : (hv * (1 - dp) * 0.011) / 12;
+const _mTotal = (hv, dp, rate = 0.07) => {
+  const pi = _mMortgage(hv, dp, rate);
+  return pi != null ? pi + _mPMI(hv, dp) : null;
+};
+const _dti = (hv, hhi, dp, rate = 0.07) => {
+  if (!hv || !hhi || dp == null) return null;
+  const pmt = _mTotal(hv, dp, rate);
+  return pmt ? (pmt / (hhi / 12)) * 100 : null;
+};
+const _poolPct = (hv, hhi, dp, rate = 0.07, sigma = 0.85) => {
+  if (!hv || !hhi || dp == null) return null;
+  const pmt = _mTotal(hv, dp, rate);
+  if (!pmt) return null;
+  const maxInc = (pmt / 0.43) * 12;
+  const mu = Math.log(hhi) - (sigma * sigma) / 2;
+  const z = (Math.log(maxInc) - mu) / sigma;
+  const erf = (x) => {
+    const t = 1 / (1 + 0.3275911 * Math.abs(x)),
+      p =
+        t *
+        (0.254829592 +
+          t *
+            (-0.284496736 +
+              t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    const v = 1 - p * Math.exp(-x * x);
+    return x >= 0 ? v : -v;
+  };
+  return ((1 + erf(z / Math.SQRT2)) / 2) * 100;
+};
+const _dpReach = (hv, dp, hhi, yrs = 3, sr = 0.1, sigma = 0.85) => {
+  if (!hv || !hhi || dp == null) return null;
+  const minInc = (hv * dp) / (sr * yrs);
+  const mu = Math.log(hhi) - (sigma * sigma) / 2;
+  const z = (Math.log(minInc) - mu) / sigma;
+  const erf = (x) => {
+    const t = 1 / (1 + 0.3275911 * Math.abs(x)),
+      p =
+        t *
+        (0.254829592 +
+          t *
+            (-0.284496736 +
+              t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    const v = 1 - p * Math.exp(-x * x);
+    return x >= 0 ? v : -v;
+  };
+  return (1 - (1 + erf(z / Math.SQRT2)) / 2) * 100;
+};
+
+// ─── Supplemental signal helpers ─────────────────────────────────────────────
+const SUPP_SIG = {
+  "Strong Tailwind": { color: "#16a34a", bg: "#dcfce7" },
+  Tailwind: { color: "#15803d", bg: "#f0fdf4" },
+  Neutral: { color: "#6b7280", bg: "#f3f4f6" },
+  Headwind: { color: "#d97706", bg: "#fffbeb" },
+  "Strong Headwind": { color: "#dc2626", bg: "#fef2f2" },
+  "No Data": { color: "#9ca3af", bg: "#f9fafb" },
+};
+
+function pctToSig(pct) {
+  if (pct == null) return { label: "No Data", ...SUPP_SIG["No Data"] };
+  const label =
+    pct >= 80
+      ? "Strong Tailwind"
+      : pct >= 60
+        ? "Tailwind"
+        : pct >= 40
+          ? "Neutral"
+          : pct >= 20
+            ? "Headwind"
+            : "Strong Headwind";
+  return { label, ...SUPP_SIG[label] };
+}
+
+function computeSupplementalSignals(metrics, allCounties, population) {
+  if (!metrics || !allCounties?.length) return [];
+  const met = metrics;
+  const pop = population || met.population || 1;
+  const pctile = (key, lowerBetter = false) => {
+    const vals = allCounties
+      .map((x) => x.metrics?.[key])
+      .filter((v) => v != null && !isNaN(v));
+    const val = met[key];
+    if (val == null || !vals.length) return null;
+    const below = vals.filter((v) => (lowerBetter ? v > val : v < val)).length;
+    const equal = vals.filter((v) => v === val).length;
+    return Math.round(((below + 0.5 * equal) / vals.length) * 100);
+  };
+  const fmtDollar = (v) =>
+    v == null
+      ? null
+      : v >= 1e9
+        ? `$${(v / 1e9).toFixed(1)}B`
+        : v >= 1e6
+          ? `$${(v / 1e6).toFixed(0)}M`
+          : `$${Math.round(v).toLocaleString()}`;
+
+  // Buyer affordability helpers
+  const zhvi = met.zhvi_latest;
+  const hhi = met.median_hhi;
+  const stdDTI = _dti(zhvi, hhi, 0.03);
+  const stdPool = _poolPct(zhvi, hhi, 0.03);
+  const stdPmt = _mTotal(zhvi, 0.03);
+  const dpReach = _dpReach(zhvi, 0.03, hhi, 3, 0.1);
+  const dtiPct =
+    stdDTI != null
+      ? Math.round(Math.max(0, Math.min(100, ((55 - stdDTI) / 40) * 100)))
+      : null;
+
+  return [
+    {
+      pct: pctile("zhvi_latest", true),
+      metric: "Home Value (ZHVI)",
+      sub: "Zillow ZHVI · lower = stronger entry cost advantage",
+      value: zhvi ? `$${Math.round(zhvi / 1000)}k` : null,
+      interp:
+        zhvi == null
+          ? null
+          : zhvi < 150000
+            ? "Well below national avg — deep value basis, strong entry cost advantage."
+            : zhvi < 250000
+              ? "Below national avg — favorable entry cost for this thesis."
+              : zhvi < 350000
+                ? "Near national avg — standard cost environment."
+                : "Above national avg — higher basis compresses relative upside.",
+    },
+    {
+      pct: pctile("zhvi_growth_1yr"),
+      metric: "1-Yr Appreciation",
+      sub: "Zillow ZHVI YoY · tests post-hike demand durability",
+      value:
+        met.zhvi_growth_1yr != null
+          ? `${met.zhvi_growth_1yr >= 0 ? "+" : ""}${(met.zhvi_growth_1yr * 100).toFixed(1)}%`
+          : null,
+      interp:
+        met.zhvi_growth_1yr == null
+          ? null
+          : met.zhvi_growth_1yr > 0.1
+            ? "Strong appreciation — durable demand confirmed post rate-hike cycle."
+            : met.zhvi_growth_1yr > 0.04
+              ? "Moderate appreciation — holding above national floor."
+              : met.zhvi_growth_1yr > 0
+                ? "Slow appreciation — demand present but limited momentum."
+                : "Negative — market facing active demand headwind.",
+    },
+    {
+      pct: pctile("unemployment_rate"),
+      metric: "Unemployment Rate",
+      sub: "Census ACS 2022 · civilian unemployment rate",
+      value:
+        met.unemployment_rate != null
+          ? `${met.unemployment_rate.toFixed(1)}%`
+          : null,
+      interp:
+        met.unemployment_rate == null
+          ? null
+          : met.unemployment_rate > 8
+            ? "High unemployment — deep distress signal; large labor reserve for employer catalyst."
+            : met.unemployment_rate > 5
+              ? "Above-average — meaningful labor slack, supports activation thesis."
+              : met.unemployment_rate > 3.5
+                ? "Moderate unemployment — some slack present."
+                : "Low unemployment — tight labor market; limited workforce availability.",
+    },
+    {
+      pct: pctile("poverty_rate"),
+      metric: "Poverty Rate",
+      sub: "Census ACS 2022 · % population below poverty line",
+      value:
+        met.poverty_rate != null ? `${met.poverty_rate.toFixed(1)}%` : null,
+      interp:
+        met.poverty_rate == null
+          ? null
+          : met.poverty_rate > 20
+            ? "High poverty — strong basis for below-market acquisition and community reinvestment."
+            : met.poverty_rate > 14
+              ? "Above-average — consistent with activation market profile."
+              : met.poverty_rate > 8
+                ? "Moderate — some distress present."
+                : "Low poverty — limited distress signal.",
+    },
+    {
+      pct: pctile("vacancy_rate"),
+      metric: "Housing Vacancy Rate",
+      sub: "Census ACS 2022 · % housing units vacant",
+      value:
+        met.vacancy_rate != null ? `${met.vacancy_rate.toFixed(1)}%` : null,
+      interp:
+        met.vacancy_rate == null
+          ? null
+          : met.vacancy_rate > 15
+            ? "High — large pool of acquirable distressed stock."
+            : met.vacancy_rate > 10
+              ? "Above-average — meaningful supply of distressed units."
+              : met.vacancy_rate > 6
+                ? "Moderate — some acquisition opportunities present."
+                : "Low — tight stock; limited distressed asset sourcing.",
+    },
+    {
+      pct: pctile("pop_growth_pct"),
+      metric: "Population Growth",
+      sub: "Census ACS 2019–2022 CAGR · demand formation trend",
+      value:
+        met.pop_growth_pct != null
+          ? `${met.pop_growth_pct >= 0 ? "+" : ""}${met.pop_growth_pct.toFixed(1)}%`
+          : null,
+      interp:
+        met.pop_growth_pct == null
+          ? null
+          : met.pop_growth_pct > 3
+            ? "Strong growth — demand wave building ahead of re-rating."
+            : met.pop_growth_pct > 1
+              ? "Moderate growth — demand trend positive."
+              : met.pop_growth_pct > 0
+                ? "Slow growth — limited demand momentum."
+                : "Declining — contracting household base; requires stronger catalyst to offset.",
+    },
+    {
+      pct: pctile("lfpr"),
+      metric: "Labor Force Participation",
+      sub: "Census ACS 2022 · % pop 16+ in labor force",
+      value: met.lfpr != null ? `${met.lfpr.toFixed(1)}%` : null,
+      interp:
+        met.lfpr == null
+          ? null
+          : met.lfpr > 65
+            ? "High participation — engaged workforce, strong employment culture."
+            : met.lfpr > 58
+              ? "Average participation — standard labor force engagement."
+              : "Low participation — structural unemployment or discouraged workforce; signals deeper distress.",
+    },
+    {
+      pct: pctile("fed_awards_per_capita"),
+      metric: "Federal Investment (FY24)",
+      sub: "USASpending.gov · total county awards",
+      value: fmtDollar(
+        met.fed_awards_per_capita != null
+          ? met.fed_awards_per_capita * pop
+          : null,
+      ),
+      interp:
+        met.fed_awards_per_capita == null
+          ? null
+          : pctile("fed_awards_per_capita") >= 80
+            ? "High federal investment — active public capital flow, strong catalyst signal."
+            : pctile("fed_awards_per_capita") >= 60
+              ? "Above-average federal presence — meaningful public sector engagement."
+              : pctile("fed_awards_per_capita") >= 40
+                ? "Moderate federal footprint — typical public sector activity."
+                : "Below-average federal investment — limited public catalyst activity.",
+    },
+    {
+      pct: met.oz_tract_flag ? 85 : 20,
+      metric: "Opportunity Zone",
+      sub: "HUD OZ tract designation · federal tax incentive infrastructure",
+      value:
+        met.oz_tract_flag != null
+          ? met.oz_tract_flag
+            ? "Designated"
+            : "Not Designated"
+          : null,
+      interp:
+        met.oz_tract_flag == null
+          ? null
+          : met.oz_tract_flag
+            ? "OZ designation present — federal tax-advantaged investment infrastructure in place, reducing effective capital cost."
+            : "No OZ designation — standard tax treatment applies; no federal tax incentive leverage.",
+    },
+    {
+      pct: pctile("biz_apps_per_1k"),
+      metric: "Business Formation Rate",
+      sub: "Census BFS · high-propensity business applications per 1k pop",
+      value:
+        met.biz_apps_per_1k != null
+          ? `${met.biz_apps_per_1k.toFixed(2)}/1k`
+          : null,
+      interp:
+        met.biz_apps_per_1k == null
+          ? null
+          : met.biz_apps_per_1k > 3
+            ? "High formation — entrepreneurial momentum; early recovery signal."
+            : met.biz_apps_per_1k > 1.5
+              ? "Above-average — meaningful new venture activity."
+              : met.biz_apps_per_1k > 0.8
+                ? "Moderate — standard start activity."
+                : "Below-average — limited entrepreneurial activity.",
+    },
+    {
+      pct: pctile("estab_growth_pct"),
+      metric: "Establishment Growth",
+      sub: "Census CBP YoY · % change in business establishments",
+      value:
+        met.estab_growth_pct != null
+          ? `${met.estab_growth_pct >= 0 ? "+" : ""}${met.estab_growth_pct.toFixed(1)}%`
+          : null,
+      interp:
+        met.estab_growth_pct == null
+          ? null
+          : met.estab_growth_pct > 5
+            ? "Strong — business base expanding rapidly."
+            : met.estab_growth_pct > 2
+              ? "Above-average — steady expansion."
+              : met.estab_growth_pct > 0
+                ? "Modest — stable environment."
+                : "Declining — warrants monitoring against activation thesis.",
+    },
+    {
+      pct: pctile("broadband_pct"),
+      metric: "Broadband Coverage",
+      sub: "FCC BDC · % of addresses with broadband service",
+      value:
+        met.broadband_pct != null ? `${met.broadband_pct.toFixed(1)}%` : null,
+      interp:
+        met.broadband_pct == null
+          ? null
+          : met.broadband_pct > 90
+            ? "Strong broadband — ready for remote workforce and employer tech requirements."
+            : met.broadband_pct > 70
+              ? "Adequate coverage — functional connectivity, some gaps."
+              : met.broadband_pct > 50
+                ? "Partial coverage — connectivity gaps may limit employer attraction."
+                : "Limited broadband — significant infrastructure gap; headwind for knowledge-economy catalyst.",
+    },
+    {
+      pct: pctile("fema_risk_score", true),
+      metric: "Climate Risk Score",
+      sub: "FEMA NRI · composite natural hazard risk (lower = safer)",
+      value:
+        met.fema_risk_score != null
+          ? `${met.fema_risk_score.toFixed(0)}/100`
+          : null,
+      interp:
+        met.fema_risk_score == null
+          ? null
+          : met.fema_risk_score < 20
+            ? "Low risk — minimal hazard; strong long-term asset durability."
+            : met.fema_risk_score < 40
+              ? "Below-average risk — manageable hazard profile."
+              : met.fema_risk_score < 60
+                ? "Moderate risk — factor into underwriting."
+                : met.fema_risk_score < 80
+                  ? "Elevated risk — above-average insurance and resilience costs."
+                  : "High climate risk — significant exposure; risk-adjusted underwriting required.",
+    },
+    {
+      pct: pctile("oes_median_wage"),
+      metric: "Median Annual Wage",
+      sub: "BLS OES · MSA-level median annual wage across all occupations",
+      value:
+        met.oes_median_wage != null
+          ? `$${Math.round(met.oes_median_wage).toLocaleString()}`
+          : null,
+      interp:
+        met.oes_median_wage == null
+          ? null
+          : met.oes_median_wage > 60000
+            ? "Above-average wages — strong labor income supports household formation."
+            : met.oes_median_wage > 45000
+              ? "Near-average wages — standard labor market income."
+              : "Below-average wages — lower income; consistent with distressed entry cost thesis.",
+    },
+    ...(zhvi && hhi
+      ? [
+          {
+            pct: dtiPct,
+            metric: "Buyer Affordability (Standard)",
+            sub: "3% down + PMI · DTI at 43% ceiling",
+            value: stdDTI != null ? `${stdDTI.toFixed(1)}% DTI` : null,
+            interp:
+              dpReach != null
+                ? `~${dpReach.toFixed(0)}% of households could save the 3% down in 3 yrs — barrier is cash flow, not savings. Standard financing requires $${stdPmt != null ? Math.round(stdPmt).toLocaleString() : "—"}/mo, qualifying ~${stdPool != null ? stdPool.toFixed(0) : "—"}% of households.`
+                : `3% down + PMI requires $${stdPmt != null ? Math.round(stdPmt).toLocaleString() : "—"}/mo (${stdDTI != null ? stdDTI.toFixed(1) : "—"}% DTI), qualifying ~${stdPool != null ? stdPool.toFixed(0) : "—"}% of households.`,
+          },
+        ]
+      : []),
+  ].filter((sig) => sig.value != null);
+}
+
 // ─── Ch 03: Market Fundamentals ───────────────────────────────────────────────
-function MarketFundamentalsPage({ county, thesis }) {
-  const m = county.metrics || {};
-  const dims = county.dims || [];
+function MarketFundamentalsPage({ county, thesis, supplementalSignals = [] }) {
+  const name = county.name || county.county_name;
 
-  // Organize metrics by category
-  const econMetrics = [
-    {
-      label: "Unemployment Rate",
-      value:
-        m.unemployment_rate != null
-          ? `${fmtNum(m.unemployment_rate, 1)}%`
-          : "—",
-      sub: "BLS",
-    },
-    {
-      label: "Median Household Income",
-      value:
-        m.median_household_income != null
-          ? `$${fmtNum(m.median_household_income)}`
-          : "—",
-      sub: "ACS",
-    },
-    {
-      label: "Population",
-      value: m.population != null ? fmtNum(m.population) : "—",
-      sub: "Census",
-    },
-    {
-      label: "Pop Growth (CAGR)",
-      value: m.pop_growth_pct != null ? fmtPct(m.pop_growth_pct) : "—",
-      sub: "5-yr",
-    },
-    {
-      label: "Labor Force",
-      value: m.labor_force != null ? fmtNum(m.labor_force) : "—",
-      sub: "BLS",
-    },
-    {
-      label: "Net Migration Rate",
-      value: m.net_migration_rate != null ? fmtPct(m.net_migration_rate) : "—",
-      sub: "ACS",
-    },
-  ].filter((x) => x.value !== "—");
+  // Engineered dims come pre-computed as an array with score on 0–1 scale.
+  // All other theses map from a dims object with scores 0–100.
+  const dimsRaw = county.dims || {};
+  const isArrayDims = Array.isArray(dimsRaw);
+  const dimsConfig = thesis === "formation" ? OPPORTUNITY_DIMS : NEOPOLI_DIMS;
+  const dimsList = isArrayDims
+    ? dimsRaw
+    : dimsConfig.map((d) => ({
+        id: d.id,
+        label: d.label,
+        score: dimsRaw[d.id] ?? 0,
+        weight: d.weight,
+      }));
+  const dimsTitle =
+    thesis === "formation"
+      ? "Formation Dimensions"
+      : thesis === "expansion"
+        ? "Expansion Dimensions"
+        : thesis === "engineered"
+          ? "Engineered Dimensions"
+          : "Activation Dimensions";
 
-  const housingMetrics = [
-    {
-      label: "Median Home Value",
-      value:
-        m.home_value_median != null ? `$${fmtNum(m.home_value_median)}` : "—",
-      sub: "Zillow/ACS",
-    },
-    {
-      label: "HPA (1-yr)",
-      value: m.hpa_1yr != null ? fmtPct(m.hpa_1yr) : "—",
-      sub: "Estimated",
-    },
-    {
-      label: "Permit Units / 1k Pop",
-      value:
-        m.permit_units_per_1k != null ? fmtNum(m.permit_units_per_1k, 1) : "—",
-      sub: "Census BPS",
-    },
-    {
-      label: "Vacancy Rate",
-      value: m.vacancy_rate != null ? `${fmtNum(m.vacancy_rate, 1)}%` : "—",
-      sub: "ACS",
-    },
-    {
-      label: "Homeownership Rate",
-      value:
-        m.homeownership_rate != null
-          ? `${fmtNum(m.homeownership_rate, 1)}%`
-          : "—",
-      sub: "ACS",
-    },
-    {
-      label: "Farmland Value / Acre",
-      value:
-        m.farmland_value_acre != null
-          ? `$${fmtNum(m.farmland_value_acre)}`
-          : "—",
-      sub: "USDA",
-    },
-  ].filter((x) => x.value !== "—");
+  // ── Summary computation ──
+  const dimScores100 = dimsList.map((d) =>
+    isArrayDims
+      ? typeof d.score === "number"
+        ? d.score * 100
+        : 0
+      : typeof d.score === "number"
+        ? d.score
+        : 0,
+  );
+  const avgDimScore =
+    dimScores100.length > 0
+      ? Math.round(
+          dimScores100.reduce((a, b) => a + b, 0) / dimScores100.length,
+        )
+      : null;
+  const topDim = dimsList[dimScores100.indexOf(Math.max(...dimScores100))];
+  const bottomDim = dimsList[dimScores100.indexOf(Math.min(...dimScores100))];
+  const tCount = supplementalSignals.filter((s) =>
+    pctToSig(s.pct).label.includes("Tailwind"),
+  ).length;
+  const hCount = supplementalSignals.filter((s) =>
+    pctToSig(s.pct).label.includes("Headwind"),
+  ).length;
+  const sortedByPct = [...supplementalSignals]
+    .filter((s) => s.pct != null)
+    .sort((a, b) => b.pct - a.pct);
+  const topTailwind = sortedByPct[0];
+  const topHeadwind = sortedByPct[sortedByPct.length - 1];
 
-  const infraMetrics = [
-    {
-      label: "Pop Density (/ sq mi)",
-      value: m.pop_density != null ? fmtNum(m.pop_density, 0) : "—",
-      sub: "Census",
-    },
-    {
-      label: "Broadband Coverage",
-      value: m.broadband_pct != null ? `${fmtNum(m.broadband_pct, 0)}%` : "—",
-      sub: "FCC",
-    },
-    {
-      label: "Drive to MSA (min)",
-      value: m.drive_time_min != null ? fmtNum(m.drive_time_min, 0) : "—",
-      sub: "Estimated",
-    },
-    {
-      label: "FEMA Risk Score",
-      value: m.fema_risk != null ? fmtNum(m.fema_risk, 0) : "—",
-      sub: "/100",
-    },
-    {
-      label: "OZ Designation",
-      value: m.oz_eligible ? "Yes" : m.oz_eligible === false ? "No" : "—",
-      sub: "Federal",
-    },
-    {
-      label: "Biz Apps / 1k Pop",
-      value: m.biz_apps_per_1k != null ? fmtNum(m.biz_apps_per_1k, 1) : "—",
-      sub: "Census BFS",
-    },
-  ].filter((x) => x.value !== "—");
+  const summaryLine1 =
+    avgDimScore != null && topDim && bottomDim
+      ? `${dimsTitle} average ${avgDimScore}/100 across ${dimsList.length} factors — ${topDim.label} leads at ${Math.round(isArrayDims ? topDim.score * 100 : topDim.score)} and ${bottomDim.label} trails at ${Math.round(isArrayDims ? bottomDim.score * 100 : bottomDim.score)}.`
+      : null;
+  const summaryLine2 =
+    supplementalSignals.length > 0
+      ? `Of ${supplementalSignals.length} supplemental signals, ${tCount} register as tailwinds and ${hCount} as headwinds${topTailwind && topHeadwind ? ` — ${topTailwind.metric} is the primary market advantage while ${topHeadwind.metric} presents the key risk factor` : ""}.`
+      : null;
+
+  const SignalRow = ({ sig, i }) => {
+    const ss = pctToSig(sig.pct);
+    return (
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          paddingTop: 7,
+          paddingBottom: 7,
+          paddingLeft: 0,
+          paddingRight: 0,
+          borderBottomWidth: 1,
+          borderBottomColor: P.border,
+        }}
+        wrap={false}
+      >
+        {/* Colored dot + label — no border, just tinted bg pill */}
+        <View style={{ width: 86 }}>
+          <View
+            style={{
+              backgroundColor: ss.bg,
+              borderRadius: 3,
+              paddingTop: 2,
+              paddingBottom: 2,
+              paddingLeft: 6,
+              paddingRight: 6,
+              alignSelf: "flex-start",
+            }}
+          >
+            <Text
+              style={{
+                fontSize: 6.5,
+                fontFamily: "Helvetica-Bold",
+                color: ss.color,
+              }}
+            >
+              {ss.label}
+            </Text>
+          </View>
+        </View>
+        {/* Metric name + sub */}
+        <View style={{ flex: 2 }}>
+          <Text
+            style={{
+              fontSize: 7.5,
+              fontFamily: "Helvetica-Bold",
+              color: P.ink,
+            }}
+          >
+            {sig.metric}
+          </Text>
+          <Text style={{ fontSize: 6, color: P.muted, marginTop: 1 }}>
+            {sig.sub}
+          </Text>
+        </View>
+        {/* Percentile bar */}
+        <View style={{ width: 52, paddingRight: 8 }}>
+          {sig.pct != null && (
+            <>
+              <Text style={{ fontSize: 6.5, color: P.muted, marginBottom: 2 }}>
+                {sig.pct}th
+              </Text>
+              <View
+                style={{
+                  height: 3,
+                  backgroundColor: P.border,
+                  borderRadius: 1.5,
+                }}
+              >
+                <View
+                  style={{
+                    width: `${sig.pct}%`,
+                    height: "100%",
+                    backgroundColor: ss.color,
+                    borderRadius: 1.5,
+                  }}
+                />
+              </View>
+            </>
+          )}
+        </View>
+        {/* Value */}
+        <Text
+          style={{
+            width: 44,
+            fontSize: 8,
+            fontFamily: "Helvetica-Bold",
+            color: P.ink,
+            textAlign: "right",
+          }}
+        >
+          {sig.value}
+        </Text>
+        {/* Interpretation */}
+        <Text
+          style={{
+            flex: 3,
+            fontSize: 7,
+            color: P.sub,
+            lineHeight: 1.5,
+            paddingLeft: 10,
+          }}
+        >
+          {sig.interp}
+        </Text>
+      </View>
+    );
+  };
 
   return (
     <Page size="LETTER" style={s.page}>
-      <PageHeader
-        countyName={county.name || county.county_name}
-        chapter="03 — Market Fundamentals"
-      />
+      <PageHeader countyName={name} chapter="03 — Market Fundamentals" />
       <View style={s.body}>
-        <View style={s.cols}>
-          {/* Left column: dimension scores + econ metrics */}
-          <View style={s.col}>
-            {dims.length > 0 && (
-              <>
-                <SecHeader
-                  title="Dimension Score Breakdown"
-                  sub={`${THESIS_LABEL[thesis]} scoring model`}
-                />
-                {dims.map((dim) => (
-                  <ScoreBar
+        {/* ── Chapter summary ── */}
+        {(summaryLine1 || summaryLine2) && (
+          <View
+            style={{
+              backgroundColor: P.navy + "0D",
+              borderLeftWidth: 3,
+              borderLeftColor: P.navy,
+              borderRadius: 3,
+              paddingTop: 8,
+              paddingBottom: 8,
+              paddingLeft: 10,
+              paddingRight: 10,
+              marginBottom: 14,
+            }}
+          >
+            {summaryLine1 && (
+              <Text
+                style={{
+                  fontSize: 8,
+                  fontFamily: "Helvetica-Bold",
+                  color: P.ink,
+                  marginBottom: summaryLine2 ? 4 : 0,
+                }}
+              >
+                {summaryLine1}
+              </Text>
+            )}
+            {summaryLine2 && (
+              <Text style={{ fontSize: 8, color: P.sub, lineHeight: 1.5 }}>
+                {summaryLine2}
+              </Text>
+            )}
+          </View>
+        )}
+
+        {/* ── Dimensions grid — full width, 3 per row ── */}
+        {dimsList.length > 0 && (
+          <>
+            <SecHeader
+              title={dimsTitle}
+              sub="weighted dimensions · scores 0–100"
+            />
+            <View
+              style={{
+                flexDirection: "row",
+                flexWrap: "wrap",
+                gap: 5,
+                marginBottom: 14,
+              }}
+            >
+              {dimsList.map((dim) => {
+                // Engineered: score is 0–1 → multiply by 100 for display
+                const score100 = isArrayDims
+                  ? typeof dim.score === "number"
+                    ? dim.score * 100
+                    : 0
+                  : typeof dim.score === "number"
+                    ? dim.score
+                    : 0;
+                const barColor =
+                  score100 >= 75
+                    ? "#16a34a"
+                    : score100 >= 50
+                      ? P.navy
+                      : score100 >= 25
+                        ? P.amber
+                        : P.red;
+                // Engineered weights are 0–1 fractions; show as %
+                const wtLabel = isArrayDims
+                  ? `${Math.round((dim.weight || 0) * 100)}%`
+                  : `wt ${dim.weight}`;
+                return (
+                  <View
                     key={dim.id}
-                    label={dim.label}
-                    score={dim.score * 100}
-                  />
-                ))}
-                <View style={{ height: 6 }} />
-              </>
-            )}
-
-            {econMetrics.length > 0 && (
-              <>
-                <SecHeader title="Economic Indicators" />
-                <View style={s.tWrap}>
-                  <View style={s.thead}>
-                    <Text style={[s.th, { flex: 2 }]}>Metric</Text>
-                    <Text style={[s.th, { flex: 1, textAlign: "right" }]}>
-                      Value
-                    </Text>
-                    <Text style={[s.th, { flex: 1 }]}>Source</Text>
-                  </View>
-                  {econMetrics.map((m, i) => (
-                    <View key={i} style={i % 2 === 0 ? s.tr : s.trAlt}>
-                      <Text style={[s.td, { flex: 2 }]}>{m.label}</Text>
-                      <Text style={[s.tdB, { flex: 1, textAlign: "right" }]}>
-                        {m.value}
+                    style={{ width: "31.5%", marginBottom: 3 }}
+                    wrap={false}
+                  >
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        marginBottom: 2,
+                      }}
+                    >
+                      <Text
+                        style={{ fontSize: 7, color: P.sub, flexShrink: 1 }}
+                      >
+                        {dim.label}
                       </Text>
-                      <Text style={[s.tdM, { flex: 1 }]}>{m.sub}</Text>
-                    </View>
-                  ))}
-                </View>
-              </>
-            )}
-          </View>
-
-          {/* Right column: housing + infrastructure */}
-          <View style={s.col}>
-            {housingMetrics.length > 0 && (
-              <>
-                <SecHeader title="Housing Indicators" />
-                <View style={s.tWrap}>
-                  <View style={s.thead}>
-                    <Text style={[s.th, { flex: 2 }]}>Metric</Text>
-                    <Text style={[s.th, { flex: 1, textAlign: "right" }]}>
-                      Value
-                    </Text>
-                    <Text style={[s.th, { flex: 1 }]}>Source</Text>
-                  </View>
-                  {housingMetrics.map((m, i) => (
-                    <View key={i} style={i % 2 === 0 ? s.tr : s.trAlt}>
-                      <Text style={[s.td, { flex: 2 }]}>{m.label}</Text>
-                      <Text style={[s.tdB, { flex: 1, textAlign: "right" }]}>
-                        {m.value}
+                      <Text
+                        style={{
+                          fontSize: 7,
+                          fontFamily: "Helvetica-Bold",
+                          color: barColor,
+                          marginLeft: 4,
+                        }}
+                      >
+                        {Math.round(score100)}
                       </Text>
-                      <Text style={[s.tdM, { flex: 1 }]}>{m.sub}</Text>
                     </View>
-                  ))}
-                </View>
-              </>
-            )}
-
-            {infraMetrics.length > 0 && (
-              <>
-                <SecHeader title="Infrastructure & Context" />
-                <View style={s.tWrap}>
-                  <View style={s.thead}>
-                    <Text style={[s.th, { flex: 2 }]}>Metric</Text>
-                    <Text style={[s.th, { flex: 1, textAlign: "right" }]}>
-                      Value
+                    <View
+                      style={{
+                        height: 4,
+                        backgroundColor: P.border,
+                        borderRadius: 2,
+                      }}
+                    >
+                      <View
+                        style={{
+                          width: `${Math.min(score100, 100)}%`,
+                          height: "100%",
+                          backgroundColor: barColor,
+                          borderRadius: 2,
+                        }}
+                      />
+                    </View>
+                    <Text style={{ fontSize: 6, color: P.muted, marginTop: 2 }}>
+                      {wtLabel}
                     </Text>
-                    <Text style={[s.th, { flex: 1 }]}>Source</Text>
                   </View>
-                  {infraMetrics.map((m, i) => (
-                    <View key={i} style={i % 2 === 0 ? s.tr : s.trAlt}>
-                      <Text style={[s.td, { flex: 2 }]}>{m.label}</Text>
-                      <Text style={[s.tdB, { flex: 1, textAlign: "right" }]}>
-                        {m.value}
-                      </Text>
-                      <Text style={[s.tdM, { flex: 1 }]}>{m.sub}</Text>
-                    </View>
-                  ))}
-                </View>
-              </>
-            )}
-          </View>
-        </View>
+                );
+              })}
+            </View>
+          </>
+        )}
+
+        {/* ── Supplemental Signals ── */}
+        {supplementalSignals.length > 0 && (
+          <>
+            <SecHeader
+              title="Supplemental Signals"
+              sub="benchmarked against activation county universe · signal = thesis impact"
+            />
+            {supplementalSignals.map((sig, i) => (
+              <SignalRow key={sig.metric} sig={sig} i={i} />
+            ))}
+          </>
+        )}
       </View>
       <Footer
-        countyName={county.name || county.county_name}
+        countyName={name}
         thesis={thesis}
         pageLabel="Market Fundamentals"
       />
@@ -2967,10 +3721,91 @@ function MarketFundamentalsPage({ county, thesis }) {
   );
 }
 
-// ─── Ch 04: Regional Context (CEI) ───────────────────────────────────────────
+// ─── Ch 04: Neighboring Markets ──────────────────────────────────────────────
 function RegionalContextPage({ county, thesis, neighborCounties }) {
   const cei = county.cei;
   const ceiColor = CEI_COLOR[cei?.label] || P.muted;
+
+  // Regional intelligence derived from neighbor data
+  const qualifyingNeighbors = (neighborCounties || []).filter((n) => n != null);
+  let regionalIntel = null;
+  if (qualifyingNeighbors.length > 0) {
+    const subjectComposite = county.composite || 0;
+    const clusterRank =
+      qualifyingNeighbors.filter((n) => (n.composite || 0) > subjectComposite)
+        .length + 1;
+    const nScores = qualifyingNeighbors.map((n) =>
+      Math.round(n.composite || 0),
+    );
+    const scoreMin = Math.min(...nScores);
+    const scoreMax = Math.max(...nScores);
+    const popVals = qualifyingNeighbors
+      .map((n) => n.metrics?.pop_growth_pct)
+      .filter((v) => v != null);
+    const avgPop = popVals.length
+      ? popVals.reduce((s, v) => s + v, 0) / popVals.length
+      : null;
+    const unempVals = qualifyingNeighbors
+      .map((n) => n.metrics?.unemployment_rate)
+      .filter((v) => v != null);
+    const avgUnemp = unempVals.length
+      ? unempVals.reduce((s, v) => s + v, 0) / unempVals.length
+      : null;
+    const zhviVals = qualifyingNeighbors
+      .map((n) => n.metrics?.zhvi_latest)
+      .filter((v) => v != null);
+    const avgZhvi = zhviVals.length
+      ? zhviVals.reduce((s, v) => s + v, 0) / zhviVals.length
+      : null;
+    const ceiCounts = {};
+    qualifyingNeighbors.forEach((n) => {
+      if (n.cei?.label)
+        ceiCounts[n.cei.label] = (ceiCounts[n.cei.label] || 0) + 1;
+    });
+    const ceiEntries = Object.entries(ceiCounts).sort((a, b) => b[1] - a[1]);
+    const dominantCEI = ceiEntries[0];
+    const ceiUniform =
+      dominantCEI && dominantCEI[1] === qualifyingNeighbors.length;
+    const CEI_IMPLICATION = {
+      "Mature Cluster":
+        "confirming deep regional industrial maturity — demand durability is high, but site competition is elevated.",
+      "Early Leader":
+        "signaling early-formation cluster dynamics — first-mover pricing advantages remain available.",
+      "Structural Isolation":
+        "indicating the region lacks unified cluster identity — local diligence should be front-loaded.",
+      "Regional Laggard":
+        "suggesting the regional context is a headwind — identify a specific local catalyst before committing.",
+      Neutral:
+        "reflecting mixed regional dynamics — thesis validation hinges primarily on local fundamentals.",
+    };
+    const ceiImplication =
+      CEI_IMPLICATION[dominantCEI?.[0]] ||
+      "reflecting a mixed regional market context.";
+    const countName = county.name || county.county_name || "This market";
+    const rankStr =
+      clusterRank === 1
+        ? `${countName} leads its regional cluster (#1 of ${qualifyingNeighbors.length + 1} markets)`
+        : `${countName} ranks #${clusterRank} of ${qualifyingNeighbors.length + 1} in its regional cluster`;
+    const gapPart =
+      cei?.gap != null
+        ? `, ${Math.abs(cei.gap).toFixed(1)} points ${cei.gap >= 0 ? "above" : "below"} the neighbor average`
+        : "";
+    const ceiSentence = dominantCEI
+      ? `${ceiUniform ? `All ${qualifyingNeighbors.length}` : `${dominantCEI[1]} of ${qualifyingNeighbors.length}`} contiguous markets classify as ${dominantCEI[0]} — ${ceiImplication}`
+      : "";
+    const narrative = `${rankStr}${gapPart}.${ceiSentence ? ` ${ceiSentence}` : ""}`;
+    regionalIntel = {
+      clusterRank,
+      totalInCluster: qualifyingNeighbors.length + 1,
+      scoreMin,
+      scoreMax,
+      avgPop,
+      avgUnemp,
+      avgZhvi,
+      ceiEntries,
+      narrative,
+    };
+  }
 
   const CEI_MEANING = {
     "Early Leader":
@@ -2989,7 +3824,7 @@ function RegionalContextPage({ county, thesis, neighborCounties }) {
     <Page size="LETTER" style={s.page}>
       <PageHeader
         countyName={county.name || county.county_name}
-        chapter="04 — Regional Context"
+        chapter="04 — Neighboring Markets"
       />
       <View style={s.body}>
         <SecHeader
@@ -2999,18 +3834,31 @@ function RegionalContextPage({ county, thesis, neighborCounties }) {
 
         {/* CEI card */}
         {cei ? (
-          <View style={[s.ceiCard, { borderColor: ceiColor + "44" }]}>
+          <View style={[s.ceiCard, { backgroundColor: ceiColor + "12" }]}>
             <View style={s.ceiTop}>
               <View>
                 <Text style={[s.ceiLabel, { color: ceiColor }]}>
                   {cei.label}
                 </Text>
-                <Text style={[s.mLbl, { marginTop: 4 }]}>
-                  {THESIS_LABEL[thesis]} Cluster Position
-                </Text>
+                {CEI_THESIS_IMPLICATIONS[thesis]?.[cei.label]?.verdict && (
+                  <Text
+                    style={[
+                      s.mLbl,
+                      {
+                        marginTop: 3,
+                        color: ceiColor,
+                        fontFamily: "Helvetica-Bold",
+                      },
+                    ]}
+                  >
+                    {CEI_THESIS_IMPLICATIONS[thesis][cei.label].verdict}
+                  </Text>
+                )}
               </View>
               <View style={{ alignItems: "flex-end" }}>
-                <Text style={s.ceiScore}>{fmtScore(cei.score)}</Text>
+                <Text style={[s.ceiScore, { color: ceiColor }]}>
+                  {fmtScore(cei.score)}
+                </Text>
                 <Text style={s.ceiScoreSub}>CEI Score / 100</Text>
               </View>
             </View>
@@ -3061,11 +3909,13 @@ function RegionalContextPage({ county, thesis, neighborCounties }) {
                 </View>
               )}
             </View>
-            <View style={s.ceiNote}>
-              <Text style={{ fontSize: 8, color: P.sub, lineHeight: 1.55 }}>
-                {CEI_MEANING[cei.label] || ""}
+            {(CEI_THESIS_IMPLICATIONS[thesis]?.[cei.label]?.body ||
+              CEI_MEANING[cei.label]) && (
+              <Text style={s.ceiNote}>
+                {CEI_THESIS_IMPLICATIONS[thesis]?.[cei.label]?.body ||
+                  CEI_MEANING[cei.label]}
               </Text>
-            </View>
+            )}
           </View>
         ) : (
           <View style={s.infoPanel}>
@@ -3076,36 +3926,50 @@ function RegionalContextPage({ county, thesis, neighborCounties }) {
           </View>
         )}
 
-        {/* Neighbor score table */}
+        {/* Neighbor table */}
         {neighborCounties && neighborCounties.length > 0 && (
           <>
             <SecHeader
               title="Contiguous Market Overview"
-              sub="Neighboring counties in scored universe"
+              sub={`${neighborCounties.length} neighboring counties in scored universe · sorted by composite score`}
             />
             <View style={s.tWrap}>
               <View style={s.thead}>
-                <Text style={[s.th, { flex: 2 }]}>County</Text>
-                <Text style={[s.th, { flex: 1, textAlign: "right" }]}>
+                <Text style={[s.th, { flex: 2.2 }]}>County</Text>
+                <Text style={[s.th, { flex: 0.8, textAlign: "right" }]}>
                   Score
                 </Text>
-                <Text style={[s.th, { flex: 1.2 }]}>Tier</Text>
-                <Text style={[s.th, { flex: 1.2 }]}>CEI</Text>
-                <Text style={[s.th, { flex: 1, textAlign: "right" }]}>HHI</Text>
+                <Text style={[s.th, { flex: 0.9, textAlign: "right" }]}>
+                  Pop Growth
+                </Text>
+                <Text style={[s.th, { flex: 0.9, textAlign: "right" }]}>
+                  Unemp
+                </Text>
+                <Text style={[s.th, { flex: 1, textAlign: "right" }]}>
+                  Home Value
+                </Text>
+                <Text style={[s.th, { flex: 1.3 }]}>CEI</Text>
               </View>
               {neighborCounties.slice(0, 10).map((n, i) => {
-                const nScore = Math.round((n.composite || 0) * 100);
+                const nScore = Math.round(n.composite || 0);
                 const nColor = scoreColor(nScore);
+                const popGrowth = n.metrics?.pop_growth_pct;
+                const unemp = n.metrics?.unemployment_rate;
+                const zhvi = n.metrics?.zhvi_latest;
                 return (
-                  <View key={n.fips || i} style={i % 2 === 0 ? s.tr : s.trAlt}>
-                    <Text style={[s.tdB, { flex: 2 }]}>
+                  <View
+                    key={n.fips || i}
+                    style={i % 2 === 0 ? s.tr : s.trAlt}
+                    wrap={false}
+                  >
+                    <Text style={[s.tdB, { flex: 2.2 }]}>
                       {n.name || n.county_name || n.fips}
                     </Text>
                     <Text
                       style={[
                         s.td,
                         {
-                          flex: 1,
+                          flex: 0.8,
                           textAlign: "right",
                           color: nColor,
                           fontFamily: "Helvetica-Bold",
@@ -3114,24 +3978,43 @@ function RegionalContextPage({ county, thesis, neighborCounties }) {
                     >
                       {nScore}
                     </Text>
-                    <Text style={[s.td, { flex: 1.2 }]}>
-                      {TIER_LABEL[n.tier] || "—"}
+                    <Text
+                      style={[
+                        s.td,
+                        {
+                          flex: 0.9,
+                          textAlign: "right",
+                          color:
+                            popGrowth != null
+                              ? popGrowth >= 1
+                                ? P.emerald
+                                : popGrowth >= 0
+                                  ? P.navy
+                                  : P.red
+                              : P.muted,
+                        },
+                      ]}
+                    >
+                      {popGrowth != null
+                        ? `${popGrowth >= 0 ? "+" : ""}${popGrowth.toFixed(1)}%`
+                        : "—"}
+                    </Text>
+                    <Text style={[s.td, { flex: 0.9, textAlign: "right" }]}>
+                      {unemp != null ? `${unemp.toFixed(1)}%` : "—"}
+                    </Text>
+                    <Text style={[s.td, { flex: 1, textAlign: "right" }]}>
+                      {zhvi != null ? `$${Math.round(zhvi / 1000)}k` : "—"}
                     </Text>
                     <Text
                       style={[
                         s.td,
                         {
-                          flex: 1.2,
+                          flex: 1.3,
                           color: CEI_COLOR[n.cei?.label] || P.muted,
                         },
                       ]}
                     >
                       {n.cei?.label || "—"}
-                    </Text>
-                    <Text style={[s.td, { flex: 1, textAlign: "right" }]}>
-                      {n.metrics?.median_household_income
-                        ? `$${fmtNum(n.metrics.median_household_income / 1000, 0)}k`
-                        : "—"}
                     </Text>
                   </View>
                 );
@@ -3140,170 +4023,135 @@ function RegionalContextPage({ county, thesis, neighborCounties }) {
           </>
         )}
 
-        {/* Thesis-specific CEI tier reference */}
-        {CEI_THESIS_IMPLICATIONS[thesis] && (
+        {/* Regional Intelligence */}
+        {regionalIntel && (
           <>
             <SecHeader
-              title="CEI Label Reference"
-              sub={`What each label means for the ${THESIS_LABEL[thesis]} thesis`}
+              title="Regional Intelligence"
+              sub="Synthesized from contiguous market data"
             />
-            {CEI_LABEL_ORDER.map((label) => {
-              const imp = CEI_THESIS_IMPLICATIONS[thesis][label];
-              if (!imp) return null;
-              const lColor = CEI_COLOR[label] || P.muted;
-              const isCurrentLabel = cei?.label === label;
-              return (
-                <View
-                  key={label}
-                  style={{
-                    marginBottom: 6,
-                    padding: 8,
-                    borderRadius: 4,
-                    backgroundColor: isCurrentLabel ? lColor + "12" : P.light,
-                    borderWidth: isCurrentLabel ? 1 : 0.5,
-                    borderColor: isCurrentLabel ? lColor + "66" : P.border,
-                    borderStyle: "solid",
-                  }}
+            {/* Stats row */}
+            <View style={[s.ceiStats, { flexWrap: "wrap", marginBottom: 10 }]}>
+              <View style={s.ceiStatItem}>
+                <Text style={s.ceiStatLbl}>Cluster Rank</Text>
+                <Text
+                  style={[
+                    s.ceiStatVal,
+                    {
+                      color:
+                        regionalIntel.clusterRank === 1
+                          ? P.emerald
+                          : scoreColor(
+                              Math.round(
+                                100 -
+                                  ((regionalIntel.clusterRank - 1) /
+                                    (regionalIntel.totalInCluster - 1)) *
+                                    100,
+                              ),
+                            ),
+                    },
+                  ]}
                 >
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      marginBottom: 3,
-                    }}
+                  #{regionalIntel.clusterRank} of {regionalIntel.totalInCluster}
+                </Text>
+              </View>
+              <View style={s.ceiStatItem}>
+                <Text style={s.ceiStatLbl}>Neighbor Score Range</Text>
+                <Text style={s.ceiStatVal}>
+                  {regionalIntel.scoreMin}–{regionalIntel.scoreMax}
+                </Text>
+              </View>
+              {regionalIntel.avgPop != null && (
+                <View style={s.ceiStatItem}>
+                  <Text style={s.ceiStatLbl}>Avg Pop Growth</Text>
+                  <Text
+                    style={[
+                      s.ceiStatVal,
+                      {
+                        color:
+                          regionalIntel.avgPop >= 1
+                            ? P.emerald
+                            : regionalIntel.avgPop >= 0
+                              ? P.navy
+                              : P.red,
+                      },
+                    ]}
                   >
-                    <View
-                      style={{
-                        width: 7,
-                        height: 7,
-                        borderRadius: 3.5,
-                        backgroundColor: lColor,
-                        marginRight: 6,
-                      }}
-                    />
-                    <Text
-                      style={{
-                        fontSize: 9,
-                        fontFamily: "Helvetica-Bold",
-                        color: lColor,
-                      }}
-                    >
-                      {label}
-                    </Text>
-                    {isCurrentLabel && (
-                      <Text
-                        style={{
-                          fontSize: 7,
-                          color: lColor,
-                          marginLeft: 6,
-                          fontFamily: "Helvetica-Bold",
-                        }}
-                      >
-                        ← THIS MARKET
-                      </Text>
-                    )}
-                    <Text
-                      style={{
-                        fontSize: 8,
-                        color: lColor,
-                        marginLeft: "auto",
-                        fontFamily: "Helvetica-Bold",
-                      }}
-                    >
-                      {imp.verdict}
-                    </Text>
-                  </View>
-                  <Text style={{ fontSize: 8, color: P.sub, lineHeight: 1.5 }}>
-                    {imp.body}
-                  </Text>
-                </View>
-              );
-            })}
-          </>
-        )}
-
-        {/* Action implication by CEI label */}
-        {cei && (
-          <View style={s.cols}>
-            <View style={s.col}>
-              <SecHeader title="Timing Implication" />
-              {cei.label === "Early Leader" && (
-                <View style={s.infoPanel}>
-                  <Text style={[s.infoPanelTitle, { color: P.emerald }]}>
-                    Move with Urgency
-                  </Text>
-                  <Text style={s.infoPanelText}>
-                    Early Leader status is time-sensitive. The cluster is
-                    forming — regional demand is building but land and asset
-                    basis have not yet priced in the cluster effect. Window is
-                    open now; similar opportunities in adjacent markets may
-                    compress the entry window within 12–18 months.
+                    {regionalIntel.avgPop >= 0 ? "+" : ""}
+                    {regionalIntel.avgPop.toFixed(1)}%
                   </Text>
                 </View>
               )}
-              {cei.label === "Mature Cluster" && (
-                <View style={s.infoPanel}>
-                  <Text style={[s.infoPanelTitle, { color: "#2563eb" }]}>
-                    Basis Discipline Required
-                  </Text>
-                  <Text style={s.infoPanelText}>
-                    Mature Cluster markets have strong regional validation —
-                    neighboring markets confirm the thesis. The risk shifts from
-                    "is the thesis real?" to "can we acquire at defensible
-                    basis?" Competitive entry is likely. Underwrite
-                    conservatively on entry price.
+              {regionalIntel.avgUnemp != null && (
+                <View style={s.ceiStatItem}>
+                  <Text style={s.ceiStatLbl}>Avg Unemployment</Text>
+                  <Text style={s.ceiStatVal}>
+                    {regionalIntel.avgUnemp.toFixed(1)}%
                   </Text>
                 </View>
               )}
-              {cei.label === "Structural Isolation" && (
-                <View style={s.infoPanel}>
-                  <Text style={[s.infoPanelTitle, { color: P.amber }]}>
-                    Front-Load Diligence
-                  </Text>
-                  <Text style={s.infoPanelText}>
-                    Strong standalone fundamentals without regional cluster
-                    confirmation. Local demand drivers must be independently
-                    verified. Catalyst or anchor employer identification is
-                    especially important in isolated markets — do not rely on
-                    regional spillover effects.
-                  </Text>
-                </View>
-              )}
-              {cei.label === "Regional Laggard" && (
-                <View style={s.infoPanel}>
-                  <Text style={[s.infoPanelTitle, { color: P.red }]}>
-                    Identify Specific Catalyst
-                  </Text>
-                  <Text style={s.infoPanelText}>
-                    Regional context is a headwind. Unless a specific catalyst
-                    justifies the standalone thesis, the scoring gap vs.
-                    neighbors represents structural drag. Flag whether this is
-                    still worth pursuing given better-positioned alternatives in
-                    the same region.
-                  </Text>
-                </View>
-              )}
-              {cei.label === "Neutral" && (
-                <View style={s.infoPanel}>
-                  <Text style={[s.infoPanelTitle, { color: P.navy }]}>
-                    Local Fundamentals Drive Decision
-                  </Text>
-                  <Text style={s.infoPanelText}>
-                    Mixed regional context means the investment case lives or
-                    dies on local fundamentals. Neither a strong regional
-                    tailwind nor headwind is present. Standard thesis diligence
-                    applies.
+              {regionalIntel.avgZhvi != null && (
+                <View style={s.ceiStatItem}>
+                  <Text style={s.ceiStatLbl}>Avg Home Value</Text>
+                  <Text style={s.ceiStatVal}>
+                    ${Math.round(regionalIntel.avgZhvi / 1000)}k
                   </Text>
                 </View>
               )}
             </View>
-          </View>
+            {/* CEI distribution */}
+            {regionalIntel.ceiEntries.length > 0 && (
+              <View
+                style={{
+                  flexDirection: "row",
+                  gap: 10,
+                  marginBottom: 10,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                }}
+              >
+                <Text style={[s.ceiStatLbl, { marginBottom: 0 }]}>
+                  CEI Distribution:
+                </Text>
+                {regionalIntel.ceiEntries.map(([label, count]) => (
+                  <View
+                    key={label}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 4,
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: 3,
+                        backgroundColor: CEI_COLOR[label] || P.muted,
+                      }}
+                    />
+                    <Text
+                      style={{
+                        fontSize: 7,
+                        color: CEI_COLOR[label] || P.muted,
+                        fontFamily: "Helvetica-Bold",
+                      }}
+                    >
+                      {count}× {label}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
+            {/* Narrative */}
+            <Text style={s.ceiNote}>{regionalIntel.narrative}</Text>
+          </>
         )}
       </View>
       <Footer
         countyName={county.name || county.county_name}
         thesis={thesis}
-        pageLabel="Regional Context"
+        pageLabel="Neighboring Markets"
       />
     </Page>
   );
@@ -3311,9 +4159,8 @@ function RegionalContextPage({ county, thesis, neighborCounties }) {
 
 // ─── Ch 05: Neighboring Markets ───────────────────────────────────────────────
 function NeighboringMarketsPage({ county, thesis, neighborCounties }) {
-  const qualifying = (neighborCounties || []).filter(
-    (n) => n.composite != null && n.composite * 100 >= 50,
-  );
+  // CEI already identified these as scored neighbors — show all of them
+  const qualifying = (neighborCounties || []).filter((n) => n != null);
 
   if (!qualifying.length) {
     return (
@@ -3328,9 +4175,9 @@ function NeighboringMarketsPage({ county, thesis, neighborCounties }) {
               No qualifying neighboring markets
             </Text>
             <Text style={s.infoPanelText}>
-              No contiguous counties scored above 50 in the{" "}
-              {THESIS_LABEL[thesis]} model. This market is structurally isolated
-              in its cluster context.
+              No contiguous counties were found in the scored universe for this
+              market. The CEI context on page 4 provides regional cluster
+              analysis.
             </Text>
           </View>
         </View>
@@ -3356,7 +4203,7 @@ function NeighboringMarketsPage({ county, thesis, neighborCounties }) {
       <View style={s.body}>
         <SecHeader
           title="Qualifying Neighboring Markets"
-          sub={`${sorted.length} contiguous counties scoring ≥ 50 in ${THESIS_LABEL[thesis]} model`}
+          sub={`${sorted.length} contiguous counties in the scored universe · sorted by composite score`}
         />
         {sorted.map((n, i) => {
           const nScore = Math.round((n.composite || 0) * 100);
@@ -3479,25 +4326,25 @@ function ActionPlanPage({ county, thesis, defaults, actionPlanData }) {
     {
       label: "Immediate",
       key: "immediate",
-      color: P.red,
+      color: P.emerald,
       items: ap.immediate || defaults.immediate,
     },
     {
       label: "30-Day",
       key: "day30",
-      color: P.amber,
+      color: "#AB002D",
       items: ap.day30 || defaults.day30,
     },
     {
       label: "60-Day",
       key: "day60",
-      color: P.gold,
+      color: "#0A2240",
       items: ap.day60 || defaults.day60,
     },
     {
       label: "90-Day",
       key: "day90",
-      color: P.emerald,
+      color: "#778FAD",
       items: ap.day90 || defaults.day90,
     },
   ];
@@ -3575,7 +4422,7 @@ function ActionPlanPage({ county, thesis, defaults, actionPlanData }) {
   );
 }
 
-// ─── Ch 07: Diligence Checklist ───────────────────────────────────────────────
+// ─── Ch 07: Diligence Checklist ──────────────────────────────────────────────
 function DiligenceChecklistPage({ county, thesis, defaults, actionPlanData }) {
   const items = actionPlanData?.diligence || defaults.diligence || [];
   const priorityStyle = {
@@ -3607,20 +4454,12 @@ function DiligenceChecklistPage({ county, thesis, defaults, actionPlanData }) {
                   <View key={wi} style={s.dlSection}>
                     <View style={s.dlHeader}>
                       <Text style={s.dlHeaderT}>{ws.workstream}</Text>
-                      <View style={[s.dlPriority, { backgroundColor: ps.bg }]}>
-                        <Text style={[s.dlPriorityT, { color: ps.text }]}>
-                          {ws.priority}
-                        </Text>
-                      </View>
+                      <Text style={[s.dlPriorityT, { color: ps.text }]}>
+                        {ws.priority}
+                      </Text>
                     </View>
                     {(ws.items || []).map((item, ii) => (
-                      <View
-                        key={ii}
-                        style={[
-                          s.dlItem,
-                          { backgroundColor: ii % 2 === 0 ? P.white : P.light },
-                        ]}
-                      >
+                      <View key={ii} style={s.dlItem}>
                         <View style={s.dlCheckbox} />
                         <Text style={s.dlItemT}>{item}</Text>
                         <View style={s.dlStatus} />
@@ -3642,7 +4481,7 @@ function DiligenceChecklistPage({ county, thesis, defaults, actionPlanData }) {
   );
 }
 
-// ─── Ch 08: Risk Register ─────────────────────────────────────────────────────
+// ─── Ch 05: Thesis Risk Factors ───────────────────────────────────────────────
 function RiskRegisterPage({ county, thesis, defaults, actionPlanData }) {
   const risks = actionPlanData?.risks || defaults.risks || [];
 
@@ -3650,12 +4489,12 @@ function RiskRegisterPage({ county, thesis, defaults, actionPlanData }) {
     <Page size="LETTER" style={s.page}>
       <PageHeader
         countyName={county.name || county.county_name}
-        chapter="08 — Risk Register"
+        chapter="05 — Thesis Risk Factors"
       />
       <View style={s.body}>
         <SecHeader
-          title="Risk Register"
-          sub={`${THESIS_LABEL[thesis]} thesis · Thesis-specific risk factors`}
+          title="Thesis Risk Factors"
+          sub={`${THESIS_LABEL[thesis]} thesis · Likelihood, impact, and mitigation`}
         />
         <View style={s.tWrap}>
           <View style={s.thead}>
@@ -3739,7 +4578,7 @@ function RiskRegisterPage({ county, thesis, defaults, actionPlanData }) {
       <Footer
         countyName={county.name || county.county_name}
         thesis={thesis}
-        pageLabel="Risk Register"
+        pageLabel="Thesis Risk Factors"
       />
     </Page>
   );
@@ -3749,6 +4588,115 @@ function RiskRegisterPage({ county, thesis, defaults, actionPlanData }) {
 function EmployerBriefPage({ county, thesis, defaults, actionPlanData }) {
   const brief = actionPlanData?.employer_brief || defaults.employer_brief;
   const m = county.metrics || {};
+
+  const homeVal = m.zhvi_latest || m.home_value_median;
+  const hhi = m.median_household_income || m.median_hhi;
+  const housingRatio = homeVal && hhi ? homeVal / hhi : null;
+
+  const readinessSignals = [
+    m.unemployment_rate != null && {
+      title: "Labor Availability",
+      label:
+        m.unemployment_rate >= 5
+          ? "High Availability"
+          : m.unemployment_rate >= 3
+            ? "Moderate"
+            : "Tight Market",
+      sub: `${m.unemployment_rate.toFixed(1)}% unemployment`,
+      color:
+        m.unemployment_rate >= 5
+          ? P.navy
+          : m.unemployment_rate >= 3
+            ? P.amber
+            : P.red,
+    },
+    m.pop_growth_pct != null && {
+      title: "Market Trajectory",
+      label:
+        m.pop_growth_pct >= 2
+          ? "Strong Growth"
+          : m.pop_growth_pct >= 0
+            ? "Stable"
+            : "Declining",
+      sub: `${m.pop_growth_pct >= 0 ? "+" : ""}${m.pop_growth_pct.toFixed(1)}%/yr`,
+      color:
+        m.pop_growth_pct >= 2
+          ? P.navy
+          : m.pop_growth_pct >= 0
+            ? P.navy
+            : P.red,
+    },
+    housingRatio != null && {
+      title: "Housing Affordability",
+      label:
+        housingRatio < 4
+          ? "Affordable"
+          : housingRatio < 6
+            ? "Moderate Cost"
+            : "High Cost",
+      sub: homeVal ? `$${Math.round(homeVal / 1000)}k median home` : "",
+      color: housingRatio < 4 ? P.navy : housingRatio < 6 ? P.amber : P.red,
+    },
+    m.broadband_pct != null && {
+      title: "Connectivity",
+      label:
+        m.broadband_pct >= 90
+          ? "Excellent"
+          : m.broadband_pct >= 70
+            ? "Good"
+            : "Limited",
+      sub: `${m.broadband_pct.toFixed(0)}% broadband coverage`,
+      color:
+        m.broadband_pct >= 90
+          ? P.navy
+          : m.broadband_pct >= 70
+            ? P.amber
+            : P.red,
+    },
+  ].filter(Boolean);
+
+  const pop = county.population || m.population;
+  const workerMetrics = [
+    ["Population", pop ? fmtNum(pop) : null],
+    ["Labor Force", m.labor_force ? fmtNum(m.labor_force) : null],
+    [
+      "Unemployment Rate",
+      m.unemployment_rate != null ? `${m.unemployment_rate.toFixed(1)}%` : null,
+    ],
+    ["Median Household Income", hhi ? `$${fmtNum(hhi)}` : null],
+    [
+      "Poverty Rate",
+      m.poverty_rate != null ? `${m.poverty_rate.toFixed(1)}%` : null,
+    ],
+  ].filter(([, v]) => v != null);
+
+  const marketMetrics = [
+    [
+      "Pop Growth (Annual)",
+      m.pop_growth_pct != null
+        ? `${m.pop_growth_pct >= 0 ? "+" : ""}${m.pop_growth_pct.toFixed(1)}%`
+        : null,
+    ],
+    ["Median Home Value", homeVal ? `$${Math.round(homeVal / 1000)}k` : null],
+    [
+      "Home Value Growth",
+      m.zhvi_growth_1yr != null
+        ? `${m.zhvi_growth_1yr >= 0 ? "+" : ""}${(m.zhvi_growth_1yr * 100).toFixed(1)}% 1-yr`
+        : null,
+    ],
+    [
+      "Broadband Coverage",
+      m.broadband_pct != null ? `${m.broadband_pct.toFixed(0)}%` : null,
+    ],
+    [
+      "OZ Eligible",
+      m.oz_eligible != null
+        ? m.oz_eligible
+          ? "Yes — Capital gains eligible"
+          : "No"
+        : null,
+    ],
+  ].filter(([, v]) => v != null);
 
   return (
     <Page size="LETTER" style={s.page}>
@@ -3763,7 +4711,7 @@ function EmployerBriefPage({ county, thesis, defaults, actionPlanData }) {
         />
 
         {/* Stats bar */}
-        <View style={[s.bigStatRow, { marginBottom: 16 }]}>
+        <View style={[s.bigStatRow, { marginBottom: readinessSignals.length > 0 ? 10 : 16 }]}>
           {m.population && (
             <View style={s.bigStat}>
               <Text style={s.bigStatV}>{fmtNum(m.population)}</Text>
@@ -3799,6 +4747,40 @@ function EmployerBriefPage({ county, thesis, defaults, actionPlanData }) {
           )}
         </View>
 
+        {/* Readiness signal cards */}
+        {readinessSignals.length > 0 && (
+          <View style={{ flexDirection: "row", gap: 8, marginBottom: 16 }}>
+            {readinessSignals.map((sig, i) => (
+              <View
+                key={i}
+                style={{
+                  flex: 1,
+                  borderTopWidth: 2,
+                  borderTopColor: sig.color,
+                  paddingTop: 6,
+                  paddingBottom: 7,
+                  paddingHorizontal: 8,
+                  backgroundColor: P.light,
+                }}
+              >
+                <Text style={s.ceiStatLbl}>{sig.title}</Text>
+                <Text
+                  style={{
+                    fontSize: 8.5,
+                    fontFamily: "Helvetica-Bold",
+                    color: sig.color,
+                    lineHeight: 1.2,
+                    marginBottom: 2,
+                  }}
+                >
+                  {sig.label}
+                </Text>
+                <Text style={{ fontSize: 6.5, color: P.sub }}>{sig.sub}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+
         <View style={s.cols}>
           <View style={s.col}>
             {brief.workforce && (
@@ -3823,22 +4805,11 @@ function EmployerBriefPage({ county, thesis, defaults, actionPlanData }) {
             )}
 
             {/* AP workforce housing note */}
-            <View
-              style={[
-                s.infoPanel,
-                {
-                  borderLeftWidth: 3,
-                  borderLeftColor: P.emerald,
-                  paddingLeft: 12,
-                  borderRadius: 0,
-                  borderWidth: 0,
-                },
-              ]}
-            >
-              <Text style={[s.infoPanelTitle, { color: P.emerald }]}>
+            <View style={s.empSection}>
+              <Text style={s.empTitle}>
                 American Pledge Workforce Housing
               </Text>
-              <Text style={s.infoPanelText}>
+              <Text style={s.empText}>
                 The American Pledge program provides employer-adjacent workforce
                 housing solutions by expanding the qualified buyer pool for
                 incoming employees. AP eliminates the down payment savings
@@ -3852,23 +4823,9 @@ function EmployerBriefPage({ county, thesis, defaults, actionPlanData }) {
 
             {/* OZ note if applicable */}
             {m.oz_eligible && (
-              <View
-                style={[
-                  s.infoPanel,
-                  {
-                    borderLeftWidth: 3,
-                    borderLeftColor: P.gold,
-                    paddingLeft: 12,
-                    borderRadius: 0,
-                    borderWidth: 0,
-                    marginTop: 8,
-                  },
-                ]}
-              >
-                <Text style={[s.infoPanelTitle, { color: P.gold }]}>
-                  Opportunity Zone Designation
-                </Text>
-                <Text style={s.infoPanelText}>
+              <View style={[s.empSection, { marginTop: 8 }]}>
+                <Text style={s.empTitle}>Opportunity Zone Designation</Text>
+                <Text style={s.empText}>
                   This county contains qualified Opportunity Zone tracts.
                   Federal OZ designation provides capital gains tax deferral and
                   potential exclusion for investments held 10+ years, creating a
@@ -3878,6 +4835,77 @@ function EmployerBriefPage({ county, thesis, defaults, actionPlanData }) {
             )}
           </View>
         </View>
+        {/* Key Employer Metrics reference table */}
+        {(workerMetrics.length > 0 || marketMetrics.length > 0) && (
+          <>
+            <SecHeader
+              title="Key Employer Metrics"
+              sub="County-level reference data for site selection diligence"
+            />
+            <View style={{ flexDirection: "row", gap: 20 }}>
+              {workerMetrics.length > 0 && (
+                <View style={{ flex: 1 }}>
+                  <Text style={[s.ceiStatLbl, { marginBottom: 5 }]}>
+                    Workforce
+                  </Text>
+                  {workerMetrics.map(([label, val], i) => (
+                    <View
+                      key={i}
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        paddingVertical: 4,
+                        borderBottomWidth: 0.5,
+                        borderBottomColor: P.border,
+                      }}
+                    >
+                      <Text style={{ fontSize: 7, color: P.sub }}>{label}</Text>
+                      <Text
+                        style={{
+                          fontSize: 7.5,
+                          fontFamily: "Helvetica-Bold",
+                          color: P.ink,
+                        }}
+                      >
+                        {val}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+              {marketMetrics.length > 0 && (
+                <View style={{ flex: 1 }}>
+                  <Text style={[s.ceiStatLbl, { marginBottom: 5 }]}>
+                    Market & Infrastructure
+                  </Text>
+                  {marketMetrics.map(([label, val], i) => (
+                    <View
+                      key={i}
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        paddingVertical: 4,
+                        borderBottomWidth: 0.5,
+                        borderBottomColor: P.border,
+                      }}
+                    >
+                      <Text style={{ fontSize: 7, color: P.sub }}>{label}</Text>
+                      <Text
+                        style={{
+                          fontSize: 7.5,
+                          fontFamily: "Helvetica-Bold",
+                          color: P.ink,
+                        }}
+                      >
+                        {val}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          </>
+        )}
       </View>
       <Footer
         countyName={county.name || county.county_name}
@@ -3904,10 +4932,23 @@ function LandOpportunitiesPage({ county, thesis, listings }) {
   const name = county.name || county.county_name || "County";
   const state = county.state_abbr || county.state || "";
   const minAcres = THESIS_MIN_ACRES[thesis] || 25;
-  const context = THESIS_LAND_CONTEXT[thesis] || "";
   const hasData = listings && listings.length > 0;
 
-  const COL_WIDTHS = [170, 52, 70, 70, 44, 60]; // address, acres, price, $/ac, DOM, office
+  const COL_WIDTHS = [148, 42, 62, 52, 46, 34, 82]; // address, acres, price, $/ac, vs.median, DOM, listed by
+
+  // ── Batch insights ─────────────────────────────────────────────────────────
+  const m = county.metrics || county;
+  const validPpa = listings.filter((p) => p.pricePerAc > 0).map((p) => p.pricePerAc);
+  const sortedPpa = [...validPpa].sort((a, b) => a - b);
+  const medianPpa = sortedPpa.length > 0 ? sortedPpa[Math.floor(sortedPpa.length / 2)] : null;
+  const validDom = listings.filter((p) => p.dom != null).map((p) => p.dom);
+  const avgDom = validDom.length > 0 ? Math.round(validDom.reduce((a, b) => a + b, 0) / validDom.length) : null;
+  const hhi = m.median_household_income || m.median_hhi;
+  const sortedByPrice = [...listings].sort((a, b) => a.price - b.price);
+  const medianPrice = sortedByPrice.length > 0 ? sortedByPrice[Math.floor(sortedByPrice.length / 2)]?.price : null;
+  const hhiMultiple = medianPrice && hhi ? Math.round(medianPrice / hhi) : null;
+  const zhviGrowth = m.zhvi_growth_1yr;
+  const priceCutCount = listings.filter((p) => p.priceReduced).length;
 
   return (
     <Page size="LETTER" style={s.page}>
@@ -3923,13 +4964,81 @@ function LandOpportunitiesPage({ county, thesis, listings }) {
           </Text>
         </View>
 
-        {/* Context blurb */}
-        <View style={[s.infoPanel, { marginBottom: 12 }]}>
-          <Text style={s.infoPanelText}>{context}</Text>
-        </View>
-
         {hasData ? (
           <>
+            {/* Insights strip */}
+            <View
+              style={{
+                flexDirection: "row",
+                backgroundColor: P.light,
+                borderWidth: 0.5,
+                borderColor: P.border,
+                borderRadius: 3,
+                paddingVertical: 8,
+                paddingHorizontal: 10,
+                marginBottom: 10,
+                gap: 0,
+              }}
+            >
+              {[
+                medianPpa != null && {
+                  label: "Median $/Acre",
+                  value: `$${fmtNum(medianPpa)}`,
+                  sub: "across this batch",
+                },
+                avgDom != null && {
+                  label: "Avg. Days Listed",
+                  value: `${avgDom}d`,
+                  sub: priceCutCount > 0 ? `${priceCutCount} w/ price cuts` : "no price cuts",
+                },
+                zhviGrowth != null && {
+                  label: "Residential Appreciation",
+                  value: `${zhviGrowth >= 0 ? "+" : ""}${(zhviGrowth * 100).toFixed(1)}%/yr`,
+                  sub: "ZHVI 1-yr · land lags",
+                },
+                hhiMultiple != null && {
+                  label: "HHI Multiple",
+                  value: `${hhiMultiple}×`,
+                  sub: "median ask / local income",
+                },
+              ]
+                .filter(Boolean)
+                .map((stat, i, arr) => (
+                  <View
+                    key={stat.label}
+                    style={{
+                      flex: 1,
+                      paddingHorizontal: 8,
+                      borderLeftWidth: i > 0 ? 0.5 : 0,
+                      borderLeftColor: P.border,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 6,
+                        color: P.muted,
+                        textTransform: "uppercase",
+                        letterSpacing: 0.6,
+                        marginBottom: 2,
+                      }}
+                    >
+                      {stat.label}
+                    </Text>
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontFamily: "Helvetica-Bold",
+                        color: P.navy,
+                        marginBottom: 1,
+                      }}
+                    >
+                      {stat.value}
+                    </Text>
+                    <Text style={{ fontSize: 6, color: P.muted }}>{stat.sub}</Text>
+                  </View>
+                ))}
+            </View>
+
             {/* Table header */}
             <View
               style={{
@@ -3945,6 +5054,7 @@ function LandOpportunitiesPage({ county, thesis, listings }) {
                 "Acres",
                 "Asking Price",
                 "$/Acre",
+                "vs. Median",
                 "DOM",
                 "Listed By",
               ].map((h, i) => (
@@ -3968,112 +5078,211 @@ function LandOpportunitiesPage({ county, thesis, listings }) {
             {/* Table rows */}
             {listings.map((p, i) => {
               const bg = i % 2 === 0 ? P.white : P.light;
-              const acreColor =
-                p.acres >= minAcres * 2
-                  ? P.emerald
-                  : p.acres >= minAcres
-                    ? P.navy
-                    : P.muted;
+              const hasDetail = p.priceChangePct != null;
+              const ppaDelta =
+                medianPpa && p.pricePerAc > 0
+                  ? Math.round(((p.pricePerAc - medianPpa) / medianPpa) * 100)
+                  : null;
+              const longListed = avgDom != null && p.dom != null && p.dom > avgDom * 1.5;
               return (
                 <View
                   key={i}
+                  wrap={false}
                   style={{
-                    flexDirection: "row",
                     backgroundColor: bg,
-                    paddingVertical: 7,
-                    paddingHorizontal: 4,
                     borderBottomWidth: 0.5,
                     borderBottomColor: P.border,
                   }}
                 >
-                  <View style={{ width: COL_WIDTHS[0], paddingHorizontal: 4 }}>
-                    <Text
-                      style={{
-                        fontSize: 8,
-                        fontFamily: "Helvetica-Bold",
-                        color: P.navy,
-                        marginBottom: 1,
-                      }}
-                    >
-                      {p.address.length > 36
-                        ? p.address.slice(0, 34) + "…"
-                        : p.address}
-                    </Text>
-                    <Text style={{ fontSize: 7, color: P.muted }}>
-                      {p.city}
-                    </Text>
-                  </View>
-                  <Text
+                  {/* Main data row */}
+                  <View
                     style={{
-                      width: COL_WIDTHS[1],
-                      fontSize: 10,
-                      fontFamily: "Helvetica-Bold",
-                      color: acreColor,
+                      flexDirection: "row",
+                      paddingTop: 7,
+                      paddingBottom: hasDetail ? 3 : 7,
                       paddingHorizontal: 4,
-                      paddingTop: 1,
                     }}
                   >
-                    {p.acres.toLocaleString()}
-                  </Text>
-                  <Text
-                    style={{
-                      width: COL_WIDTHS[2],
-                      fontSize: 8.5,
-                      fontFamily: "Helvetica-Bold",
-                      color: P.navy,
-                      paddingHorizontal: 4,
-                      paddingTop: 2,
-                    }}
-                  >
-                    $
-                    {p.price >= 1000000
-                      ? (p.price / 1000000).toFixed(2) + "M"
-                      : fmtNum(p.price)}
-                  </Text>
-                  <Text
-                    style={{
-                      width: COL_WIDTHS[3],
-                      fontSize: 8,
-                      color: P.sub,
-                      paddingHorizontal: 4,
-                      paddingTop: 2,
-                    }}
-                  >
-                    ${fmtNum(p.pricePerAc)}
-                  </Text>
-                  <Text
-                    style={{
-                      width: COL_WIDTHS[4],
-                      fontSize: 8,
-                      color: p.dom > 180 ? P.amber : P.sub,
-                      paddingHorizontal: 4,
-                      paddingTop: 2,
-                    }}
-                  >
-                    {p.dom != null ? p.dom : "—"}
-                  </Text>
-                  <View style={{ width: COL_WIDTHS[5], paddingHorizontal: 4 }}>
-                    {p.office && (
+                    <View style={{ width: COL_WIDTHS[0], paddingHorizontal: 4 }}>
                       <Text
                         style={{
-                          fontSize: 6.5,
-                          color: P.muted,
-                          lineHeight: 1.3,
+                          fontSize: 7.5,
+                          fontFamily: "Helvetica-Bold",
+                          color: P.navy,
+                          marginBottom: 1,
                         }}
                       >
-                        {p.office.length > 20
-                          ? p.office.slice(0, 18) + "…"
-                          : p.office}
+                        {p.street}
                       </Text>
-                    )}
-                    {p.mls && (
+                      <Text style={{ fontSize: 7, color: P.muted }}>
+                        {p.cityStateZip}
+                        {p.propertyType &&
+                        p.propertyType.toLowerCase() !== "land"
+                          ? ` · ${p.propertyType}`
+                          : ""}
+                      </Text>
+                    </View>
+                    <Text
+                      style={{
+                        width: COL_WIDTHS[1],
+                        fontSize: 10,
+                        fontFamily: "Helvetica-Bold",
+                        color: P.navy,
+                        paddingHorizontal: 4,
+                        paddingTop: 1,
+                      }}
+                    >
+                      {p.acres.toLocaleString()}
+                    </Text>
+                    <Text
+                      style={{
+                        width: COL_WIDTHS[2],
+                        fontSize: 8.5,
+                        fontFamily: "Helvetica-Bold",
+                        color: P.navy,
+                        paddingHorizontal: 4,
+                        paddingTop: 2,
+                      }}
+                    >
+                      $
+                      {p.price >= 1000000
+                        ? (p.price / 1000000).toFixed(2) + "M"
+                        : fmtNum(p.price)}
+                    </Text>
+                    {/* $/Acre */}
+                    <Text
+                      style={{
+                        width: COL_WIDTHS[3],
+                        fontSize: 8,
+                        color: P.sub,
+                        paddingHorizontal: 4,
+                        paddingTop: 2,
+                      }}
+                    >
+                      ${fmtNum(p.pricePerAc)}
+                    </Text>
+                    {/* vs. Median */}
+                    <View style={{ width: COL_WIDTHS[4], paddingHorizontal: 4, paddingTop: 1 }}>
+                      {ppaDelta != null ? (
+                        <>
+                          <Text
+                            style={{
+                              fontSize: 10,
+                              fontFamily: "Helvetica-Bold",
+                              color:
+                                ppaDelta < 0
+                                  ? "#16a34a"
+                                  : ppaDelta >= 10
+                                  ? P.amber
+                                  : P.sub,
+                            }}
+                          >
+                            {ppaDelta > 0 ? "+" : ""}
+                            {ppaDelta}%
+                          </Text>
+                          <Text style={{ fontSize: 5.5, color: P.muted, marginTop: 1 }}>
+                            {ppaDelta < 0 ? "below" : "above"} median
+                          </Text>
+                        </>
+                      ) : (
+                        <Text style={{ fontSize: 8, color: P.muted }}>—</Text>
+                      )}
+                    </View>
+                    {/* DOM */}
+                    <View style={{ width: COL_WIDTHS[5], paddingHorizontal: 4, paddingTop: 2 }}>
                       <Text
-                        style={{ fontSize: 6, color: P.muted, marginTop: 1 }}
+                        style={{
+                          fontSize: 8,
+                          color: P.sub,
+                        }}
                       >
-                        MLS #{p.mls}
+                        {p.dom != null ? p.dom : "—"}
                       </Text>
-                    )}
+                      {longListed && (
+                        <Text
+                          style={{
+                            fontSize: 5.5,
+                            color: P.amber,
+                            fontFamily: "Helvetica-Bold",
+                            marginTop: 1,
+                          }}
+                        >
+                          Long listed
+                        </Text>
+                      )}
+                    </View>
+                    {/* Listed By */}
+                    <View style={{ width: COL_WIDTHS[6], paddingHorizontal: 4 }}>
+                      {p.office && (
+                        <Text style={{ fontSize: 6.5, color: P.muted, lineHeight: 1.3 }}>
+                          {p.office.length > 22 ? p.office.slice(0, 20) + "…" : p.office}
+                        </Text>
+                      )}
+                      {p.agent && (
+                        <Text style={{ fontSize: 6.5, color: P.sub, marginTop: 1 }}>
+                          {p.agent}
+                        </Text>
+                      )}
+                      {p.agentPhone && (
+                        <Text style={{ fontSize: 6.5, color: P.sub, marginTop: 1 }}>
+                          {fmtPhone(p.agentPhone)}
+                        </Text>
+                      )}
+                      {p.mls && (
+                        <Text style={{ fontSize: 6, color: P.muted, marginTop: 1 }}>
+                          MLS #{p.mls}
+                        </Text>
+                      )}
+                    </View>
                   </View>
+
+                  {/* Detail sub-row */}
+                  {hasDetail && (
+                    <View
+                      style={{
+                        paddingHorizontal: 12,
+                        paddingBottom: 7,
+                        paddingTop: 2,
+                        flexDirection: "row",
+                        gap: 12,
+                        alignItems: "center",
+                      }}
+                    >
+                      {p.priceChangePct != null && (
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: 4,
+                            backgroundColor: p.priceReduced ? "#fff7ed" : P.light,
+                            paddingHorizontal: 6,
+                            paddingVertical: 2,
+                            borderRadius: 2,
+                          }}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 6.5,
+                              fontFamily: "Helvetica-Bold",
+                              color: p.priceReduced ? P.amber : P.navy,
+                            }}
+                          >
+                            {p.priceReduced ? "▼" : "▲"}{" "}
+                            {Math.abs(p.priceChangePct)}% Price{" "}
+                            {p.priceReduced ? "Reduction" : "Increase"}
+                          </Text>
+                          {p.originalPrice != null && (
+                            <Text style={{ fontSize: 6, color: P.muted }}>
+                              from $
+                              {p.originalPrice >= 1000000
+                                ? (p.originalPrice / 1000000).toFixed(2) + "M"
+                                : fmtNum(p.originalPrice)}
+                            </Text>
+                          )}
+                        </View>
+                      )}
+                    </View>
+                  )}
                 </View>
               );
             })}
@@ -4103,29 +5312,6 @@ function LandOpportunitiesPage({ county, thesis, listings }) {
               </Text>
             </View>
 
-            {/* Disclaimer */}
-            <View
-              style={{
-                marginTop: 14,
-                padding: "8 10",
-                backgroundColor: P.light,
-                borderLeftWidth: 2,
-                borderLeftColor: P.border,
-              }}
-            >
-              <Text style={{ fontSize: 7, color: P.muted, lineHeight: 1.6 }}>
-                <Text style={{ fontFamily: "Helvetica-Bold" }}>
-                  Disclaimer —{" "}
-                </Text>
-                Listing data sourced from Rentcast MLS aggregation. Accuracy,
-                availability, and pricing subject to change. Lot sizes and
-                acreage are as reported by the listing agent and have not been
-                independently verified. This list is illustrative only and does
-                not constitute a recommendation to purchase any specific
-                property. Conduct independent title, environmental, and zoning
-                diligence before committing to any acquisition.
-              </Text>
-            </View>
           </>
         ) : (
           <View style={{ paddingVertical: 32, alignItems: "center" }}>
@@ -4180,6 +5366,7 @@ function MarketActionPlanDoc({
   countyOnlyPath,
   totalCounties,
   landListings,
+  supplementalSignals,
 }) {
   const defaults = THESIS_DEFAULTS[thesis] || THESIS_DEFAULTS.activation;
   const name = county.name || county.county_name || "County";
@@ -4246,12 +5433,16 @@ function MarketActionPlanDoc({
         countyName={name}
         thesis={thesis}
       />
-      <MarketFundamentalsPage county={county} thesis={thesis} />
+      <MarketFundamentalsPage
+        county={county}
+        thesis={thesis}
+        supplementalSignals={supplementalSignals}
+      />
 
       {/* Ch 04 */}
       <ChapterDivider
         num="04"
-        title="Regional Context"
+        title="Neighboring Markets"
         sub={`Cluster Emergence Index — how this market positions within its ${THESIS_LABEL[thesis]} cluster.`}
         countyName={name}
         thesis={thesis}
@@ -4265,15 +5456,16 @@ function MarketActionPlanDoc({
       {/* Ch 05 */}
       <ChapterDivider
         num="05"
-        title="Neighboring Markets"
-        sub="Qualifying contiguous counties and their thesis relevance."
+        title="Thesis Risk Factors"
+        sub="What kills the thesis — likelihood, impact, and mitigation."
         countyName={name}
         thesis={thesis}
       />
-      <NeighboringMarketsPage
+      <RiskRegisterPage
         county={county}
         thesis={thesis}
-        neighborCounties={neighborCounties}
+        defaults={defaults}
+        actionPlanData={actionPlanData}
       />
 
       {/* Ch 06 */}
@@ -4309,21 +5501,6 @@ function MarketActionPlanDoc({
       {/* Ch 08 */}
       <ChapterDivider
         num="08"
-        title="Risk Register"
-        sub="What kills the thesis — likelihood, impact, and mitigation."
-        countyName={name}
-        thesis={thesis}
-      />
-      <RiskRegisterPage
-        county={county}
-        thesis={thesis}
-        defaults={defaults}
-        actionPlanData={actionPlanData}
-      />
-
-      {/* Ch 09 */}
-      <ChapterDivider
-        num="09"
         title="Employer / Stakeholder Brief"
         sub="Outward-facing profile for employer and partner conversations."
         countyName={name}
@@ -4369,17 +5546,18 @@ export async function generateAndOpenMarketActionPlan({
   county,
   thesis,
   allCounties = [],
+  neighborPool = null,
   deepDiveText = null,
   tldrText = null,
   actionPlanData = null,
 }) {
-  // Resolve neighboring counties from CEI neighbor_fips
-  const neighborFips = county.cei?.neighbor_fips || [];
-  const fipsLookup = Object.fromEntries(allCounties.map((c) => [c.fips, c]));
-  const neighborCounties = neighborFips
-    .map((fips) => fipsLookup[fips])
-    .filter(Boolean)
-    .sort((a, b) => (b.composite || 0) - (a.composite || 0));
+  // Normalize fips to 5-digit zero-padded strings on both sides.
+  const normFips = (f) => String(f).padStart(5, "0");
+  const pool = neighborPool || allCounties;
+  const fipsLookup = Object.fromEntries(pool.map((c) => [normFips(c.fips), c]));
+
+  // neighborCounties is populated below after topojson adjacency computation.
+  let neighborCounties = [];
 
   const generatedDate = new Date().toLocaleDateString("en-US", {
     year: "numeric",
@@ -4387,7 +5565,7 @@ export async function generateAndOpenMarketActionPlan({
     day: "numeric",
   });
 
-  // ── Compute geographic county map paths ──────────────────────────────────────
+  // ── Compute geographic county map paths + geographic neighbors ────────────────
   let countyMapPaths = null;
   let countyOnlyPath = null;
   let countyLatLon = null;
@@ -4395,7 +5573,8 @@ export async function generateAndOpenMarketActionPlan({
 
   try {
     const { geoPath, geoAlbersUsa } = await import("d3-geo");
-    const { feature: topoFeature } = await import("topojson-client");
+    const { feature: topoFeature, neighbors: topoNeighbors } =
+      await import("topojson-client");
 
     const topoData = await fetch(
       "https://cdn.jsdelivr.net/npm/us-atlas@3/counties-10m.json",
@@ -4406,17 +5585,28 @@ export async function generateAndOpenMarketActionPlan({
       topoData.objects.counties,
     ).features;
 
+    // Derive geographic adjacency — not dependent on CEI neighbor_fips being populated.
+    const geoms = topoData.objects.counties.geometries;
+    const adjList = topoNeighbors(geoms);
+    const targetIdx = geoms.findIndex(
+      (g) => normFips(g.id) === normFips(county.fips),
+    );
+    const adjFips =
+      targetIdx >= 0
+        ? adjList[targetIdx].map((i) => normFips(geoms[i].id))
+        : [];
+    neighborCounties = adjFips
+      .map((f) => fipsLookup[f])
+      .filter(Boolean)
+      .sort((a, b) => (b.composite || 0) - (a.composite || 0));
+
     const targetFips = county.fips;
-    const relevantFipsSet = new Set([targetFips, ...neighborFips]);
-    const relevantFeatures = allFeatures.filter(
-      (f) =>
-        relevantFipsSet.has(String(f.id).padStart(5, "0")) ||
-        relevantFipsSet.has(String(f.id)),
+    const relevantFipsSet = new Set([normFips(targetFips), ...adjFips]);
+    const relevantFeatures = allFeatures.filter((f) =>
+      relevantFipsSet.has(normFips(f.id)),
     );
     const targetFeature = allFeatures.find(
-      (f) =>
-        String(f.id).padStart(5, "0") === targetFips ||
-        String(f.id) === targetFips,
+      (f) => normFips(f.id) === normFips(targetFips),
     );
 
     if (targetFeature) {
@@ -4486,6 +5676,12 @@ export async function generateAndOpenMarketActionPlan({
     console.warn("[LandListings] error:", e.message);
   }
 
+  const supplementalSignals = computeSupplementalSignals(
+    county.metrics,
+    allCounties,
+    county.population,
+  );
+
   const blob = await pdf(
     <MarketActionPlanDoc
       county={county}
@@ -4499,6 +5695,7 @@ export async function generateAndOpenMarketActionPlan({
       countyOnlyPath={countyOnlyPath}
       totalCounties={totalCounties}
       landListings={landListings}
+      supplementalSignals={supplementalSignals}
     />,
   ).toBlob();
 
